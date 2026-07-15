@@ -8,10 +8,14 @@ harness sessions.
 
 ## Status
 
-Pre-alpha walking skeleton. The repository currently defines protocol contracts,
-an authenticated client, a connector SDK, synthetic fixtures, and a loopback-
-first service boundary. It does not include production storage, live connectors,
-model calls, autonomous memory promotion, or deployment credentials.
+Pre-alpha synthetic vertical slice. The repository defines protocol contracts,
+an authenticated client, a connector SDK, a mode-0600 deployment configuration,
+a durable SQLite evidence ledger, incremental synthetic ingestion, lifecycle-
+aware authorization, cited context retrieval, and a loopback-first service.
+
+It does not include live connectors, schedulers, model calls, compiled knowledge,
+autonomous memory promotion, or deployment credentials. Synthetic fixtures are
+still the only accepted source type.
 
 ## Knowledge layers
 
@@ -43,6 +47,7 @@ packages/client          authenticated context-fabric client
 packages/connector-sdk   connector, cursor, and conformance contracts
 apps/fabricd             service boundary and capability negotiation
 tests/fixtures           synthetic lifecycle corpus
+examples                 disabled-by-default deployment examples
 docs                     architecture, threat model, lifecycle, and ADRs
 ```
 
@@ -54,6 +59,11 @@ Node.js 22 or newer is required.
 npm ci
 npm run check
 ```
+
+Run the incremental synthetic lifecycle walkthrough in
+[docs/synthetic-testing.md](docs/synthetic-testing.md). Source configuration and
+the boundary between public schemas and private selections are documented in
+[docs/source-configuration.md](docs/source-configuration.md).
 
 The workspace is private while the protocol is pre-alpha. Individual packages
 will become publishable only after the vertical spike freezes their first

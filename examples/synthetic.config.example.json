@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "deploymentId": "fixture",
+  "mode": "shadow",
+  "principalId": "developer-a",
+  "dataDir": "${XDG_DATA_HOME}/cairnkeep-context-fabric/synthetic",
+  "sources": [
+    {
+      "id": "mock",
+      "type": "synthetic",
+      "enabled": true,
+      "fixturePath": "../tests/fixtures/evidence-lifecycle.json",
+      "containers": ["project-alpha"],
+      "batchSize": 1
+    }
+  ]
+}

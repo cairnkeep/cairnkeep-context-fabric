@@ -1,6 +1,10 @@
 {
   "fixtureVersion": 1,
   "description": "Synthetic create, update, access-change, and delete lifecycle",
+  "payloads": {
+    "fixture://payload/message-001/revision-1": "Use the stable adapter interface for project alpha.",
+    "fixture://payload/message-001/revision-2": "Use the reviewed adapter interface and validate inputs for project alpha."
+  },
   "events": [
     {
       "schemaVersion": 1,
@@ -19,9 +23,9 @@
       "authorId": "developer-a",
       "content": {
         "mimeType": "text/plain",
-        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sha256": "ef622be740860913970b93084c8743d1fb10ec83edaccfd32d82154e5f1529cb",
         "payloadRef": "fixture://payload/message-001/revision-1",
-        "bytes": 72
+        "bytes": 51
       },
       "access": {
         "version": "acl-1",
@@ -53,9 +57,9 @@
       "authorId": "developer-a",
       "content": {
         "mimeType": "text/plain",
-        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "sha256": "6762a445a599bc9e10e548fa7bceac905998feb20d075c9adccb1984f3c9f04f",
         "payloadRef": "fixture://payload/message-001/revision-2",
-        "bytes": 89
+        "bytes": 73
       },
       "access": {
         "version": "acl-1",
