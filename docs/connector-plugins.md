@@ -73,6 +73,10 @@ not source payload text or opaque cursor values. Status and preview expose only
 cursor-presence booleans. Preview never writes evidence and never advances the
 durable cursor, even when validation fails.
 
+Successful ingestion output is also bounded: it reports only the source ID,
+event count, caught-up state, and whether the cursor advanced. It never returns
+event payloads, event metadata, or opaque cursor values to the operator.
+
 ## Deployment review
 
 Before enabling ingestion, the overlay must independently verify:
