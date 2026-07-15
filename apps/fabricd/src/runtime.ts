@@ -1,11 +1,22 @@
 import { chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-import { ContextRequestSchema, type ContextPacket, type ContextRequest } from "@cairnkeep/context-contracts";
+import {
+  ContextRequestSchema,
+  type CandidateState,
+  type ContextPacket,
+  type ContextRequest,
+  type MemoryCandidate,
+} from "@cairnkeep/context-contracts";
 import { runConnectorOnce, type ConnectorBatch } from "@cairnkeep/connector-sdk";
 
 import type { FabricConfig, SyntheticSourceConfig } from "./config.js";
-import { FabricLedger, type EvidenceSummary } from "./ledger.js";
+import {
+  FabricLedger,
+  type CandidateProposal,
+  type CandidateReviewAction,
+  type EvidenceSummary,
+} from "./ledger.js";
 import { SyntheticConnector } from "./synthetic-connector.js";
 
 type SourceRuntime = {
@@ -96,6 +107,28 @@ export class FabricRuntime {
 
   evidence(includeInactive = false, principalId = this.#config.principalId): EvidenceSummary[] {
     return this.#ledger.listEvidence(principalId, includeInactive);
+  }
+
+  proposeCandidate(
+    proposal: CandidateProposal,
+    principalId = this.#config.principalId,
+  ): MemoryCandidate {
+    return this.#ledger.proposeCandidate(proposal, principalId);
+  }
+
+  candidates(
+    states?: readonly CandidateState[],
+    principalId = this.#config.principalId,
+  ): MemoryCandidate[] {
+    return this.#ledger.listCandidates(principalId, states);
+  }
+
+  reviewCandidate(
+    candidateId: string,
+    action: CandidateReviewAction,
+    principalId = this.#config.principalId,
+  ): MemoryCandidate {
+    return this.#ledger.reviewCandidate(candidateId, action, principalId);
   }
 
   #source(id: string): SourceRuntime {

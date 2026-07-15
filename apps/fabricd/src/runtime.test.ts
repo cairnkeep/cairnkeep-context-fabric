@@ -100,6 +100,121 @@ test("persists cursors and fails closed across the complete evidence lifecycle",
   });
 });
 
+test("keeps candidates in human review and invalidates them when evidence changes", async () => {
+  await withConfig(async (configPath) => {
+    const runtime = new FabricRuntime(loadFabricConfig(configPath));
+    await runtime.ingestOnce();
+    const evidenceId = runtime.evidence()[0]!.evidenceId;
+    const candidate = runtime.proposeCandidate({
+      proposedScope: "project",
+      proposedKey: "decisions/adapter-interface",
+      proposedValue: "Use the stable adapter interface.",
+      evidenceIds: [evidenceId],
+      confidence: 0.8,
+      rationale: "The source records the current project decision.",
+    });
+    assert.equal(candidate.state, "pending");
+    assert.equal(runtime.candidates()[0]?.state, "pending");
+    assert.deepEqual(runtime.candidates(undefined, "developer-b"), []);
+
+    assert.equal(runtime.reviewCandidate(candidate.candidateId, "snooze").state, "snoozed");
+    assert.equal(runtime.reviewCandidate(candidate.candidateId, "approve").state, "approved");
+    assert.throws(
+      () => runtime.reviewCandidate(candidate.candidateId, "reject"),
+      /review is already final/,
+    );
+
+    await runtime.ingestOnce();
+    assert.equal(runtime.candidates()[0]?.state, "invalid");
+    assert.throws(
+      () => runtime.reviewCandidate(candidate.candidateId, "approve"),
+      /Candidate is invalid/,
+    );
+    runtime.close();
+  });
+});
+
+test("fails closed when proposing candidates from inaccessible evidence", async () => {
+  await withConfig(async (configPath) => {
+    const runtime = new FabricRuntime(loadFabricConfig(configPath));
+    await runtime.ingestOnce();
+    await runtime.ingestOnce();
+    const evidenceId = runtime.evidence(true)[0]!.evidenceId;
+    const beforeAccessChange = runtime.proposeCandidate({
+      proposedScope: "project",
+      proposedKey: "decisions/adapter-interface",
+      proposedValue: "Use the reviewed adapter interface.",
+      evidenceIds: [evidenceId],
+      confidence: 0.8,
+      rationale: "The source records the current project decision.",
+    });
+    const candidateForDeniedPrincipal = runtime.proposeCandidate({
+      proposedScope: "project",
+      proposedKey: "decisions/adapter-interface",
+      proposedValue: "Use the reviewed adapter interface.",
+      evidenceIds: [evidenceId],
+      confidence: 0.8,
+      rationale: "The source records the current project decision.",
+    }, "developer-b");
+    await runtime.ingestOnce();
+    assert.equal(runtime.candidates()[0]?.state, "invalid");
+    assert.equal(beforeAccessChange.state, "pending");
+    assert.equal(candidateForDeniedPrincipal.state, "pending");
+    assert.deepEqual(runtime.candidates(undefined, "developer-b"), []);
+    assert.throws(() => runtime.proposeCandidate({
+      proposedScope: "project",
+      proposedKey: "decisions/adapter-interface",
+      proposedValue: "Use the reviewed adapter interface.",
+      evidenceIds: [evidenceId],
+      confidence: 0.8,
+      rationale: "The source records the current project decision.",
+    }, "developer-b"), /active, unexpired, and accessible/);
+
+    runtime.proposeCandidate({
+      proposedScope: "project",
+      proposedKey: "decisions/adapter-interface",
+      proposedValue: "Use the reviewed adapter interface.",
+      evidenceIds: [evidenceId],
+      confidence: 0.8,
+      rationale: "The source records the current project decision.",
+    });
+    await runtime.ingestOnce();
+    assert.deepEqual(runtime.candidates(), []);
+    assert.equal(runtime.evidence().length, 0);
+    runtime.close();
+  });
+});
+
+test("invalidates candidates when supporting evidence reaches retention expiry", async () => {
+  await withConfig(async (configPath) => {
+    const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as {
+      events: Array<{ retention: { class: string; expiresAt?: string } }>;
+      payloads: Record<string, string>;
+    };
+    const event = EvidenceEventSchema.parse({
+      ...fixture.events[0],
+      retention: { class: "fixture", expiresAt: "2027-01-01T00:00:00Z" },
+    });
+    const ledger = new FabricLedger(join(configPath, "..", "candidate-expiry.sqlite"));
+    await ledger.admit([event], async (payloadRef) => fixture.payloads[payloadRef]!);
+    const evidenceId = ledger.listEvidence("developer-a", false, new Date("2026-01-02T00:00:00Z"))[0]!.evidenceId;
+    const candidate = ledger.proposeCandidate({
+      proposedScope: "project",
+      proposedKey: "decisions/adapter-interface",
+      proposedValue: "Use the stable adapter interface.",
+      evidenceIds: [evidenceId],
+      confidence: 0.8,
+      rationale: "The source records the current project decision.",
+    }, "developer-a", new Date("2026-01-02T00:00:00Z"));
+    assert.equal(candidate.expiresAt, "2027-01-01T00:00:00Z");
+    assert.deepEqual(
+      ledger.listCandidates("developer-a", undefined, new Date("2027-01-02T00:00:00Z")),
+      [],
+    );
+    ledger.close();
+  });
+});
+
 test("does not advance a cursor when payload integrity validation fails", async () => {
   await withConfig(async (configPath) => {
     const root = join(configPath, "..");
@@ -186,6 +301,7 @@ test("serves authenticated cited context from the durable runtime", async () => 
       const packet = await client.context(request());
       assert.equal(packet.sections.length, 1);
       assert.equal(packet.citations.length, 1);
+      assert.equal((await client.capabilities()).features.candidates, true);
       assert.match(packet.citations[0]!.sourceLocator, /^mock:\/\/project-alpha\//);
     } finally {
       await new Promise<void>((resolve, reject) => {
@@ -219,5 +335,34 @@ test("exposes the synthetic operator workflow through the CLI", async () => {
     ) as { sections: unknown[]; citations: unknown[] };
     assert.equal(packet.sections.length, 1);
     assert.equal(packet.citations.length, 1);
+    const evidence = run("evidence", "list") as Array<{ evidenceId: string }>;
+    const candidate = run(
+      "candidates",
+      "propose",
+      "--scope",
+      "project",
+      "--key",
+      "decisions/adapter-interface",
+      "--value",
+      "Use the stable adapter interface.",
+      "--evidence",
+      evidence[0]!.evidenceId,
+      "--confidence",
+      "0.8",
+      "--rationale",
+      "The source records the current project decision.",
+    ) as { candidateId: string; state: string };
+    assert.equal(candidate.state, "pending");
+    const candidates = run("candidates", "list", "--state", "pending") as Array<{ state: string }>;
+    assert.equal(candidates[0]?.state, "pending");
+    const reviewed = run(
+      "candidates",
+      "review",
+      "--id",
+      candidate.candidateId,
+      "--action",
+      "approve",
+    ) as { state: string };
+    assert.equal(reviewed.state, "approved");
   });
 });

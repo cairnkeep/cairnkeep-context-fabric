@@ -39,6 +39,32 @@ The first ingestion admits a create event. The context packet contains one
 evidence section and one citation. The second ingestion replaces it with the
 updated payload.
 
+Before ingesting the update, exercise the local human-review queue:
+
+```bash
+EVIDENCE_ID="$(npm run --silent fabric -- evidence list \
+  --config "$CAIRN_FABRIC_CONFIG" | jq -r '.[0].evidenceId')"
+
+CANDIDATE_ID="$(npm run --silent fabric -- candidates propose \
+  --config "$CAIRN_FABRIC_CONFIG" \
+  --scope project \
+  --key decisions/adapter-interface \
+  --value "Use the stable adapter interface." \
+  --evidence "$EVIDENCE_ID" \
+  --confidence 0.8 \
+  --rationale "The source records the current project decision." \
+  | jq -r '.candidateId')"
+
+npm run fabric -- candidates list \
+  --state pending --config "$CAIRN_FABRIC_CONFIG"
+npm run fabric -- candidates review \
+  --id "$CANDIDATE_ID" --action approve --config "$CAIRN_FABRIC_CONFIG"
+```
+
+Approval records a review decision only. It does not write Cairnkeep memory.
+The following update invalidates even the approved candidate because its cited
+source revision is no longer current.
+
 The third ingestion applies an access change. `developer-b` becomes denied while
 the configured `developer-a` principal remains authorized. The fourth ingestion
 deletes the source item; subsequent context packets contain no evidence.
@@ -75,6 +101,10 @@ reviewed deployment supplies HTTPS and independent authentication controls.
 - Cursors and current evidence survive process restart.
 - Non-allowlisted containers fail admission.
 - Revoked, expired, denied, and deleted evidence is not returned.
+- Candidates are owner-scoped and require current accessible evidence.
+- Evidence mutation and ACL changes invalidate affected candidates while they
+  remain readable; revocation, deletion, and expiry purge dependent candidate
+  content.
 - Every returned evidence section has a source citation.
 - Full harness prompts are not accepted by the context contract.
 - No evidence is promoted into Cairnkeep memory.
