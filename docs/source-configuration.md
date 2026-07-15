@@ -2,10 +2,15 @@
 
 ## Current support
 
-The pre-alpha runtime accepts only `synthetic` sources. It does not discover,
-scrape, or authenticate to any account after installation. Collaboration, mail,
-work-item, and source-control connectors remain disabled until the synthetic
-lifecycle and authorization gates are complete.
+The neutral `cairn-fabric` executable accepts only `synthetic` sources. It does
+not discover, scrape, dynamically load code, or authenticate to any account
+after installation. The runtime can accept additional source types only when a
+deployment-owned executable explicitly registers their implementations through
+the connector SDK.
+
+Collaboration, mail, work-item, and source-control connectors remain absent from
+the public executable. Installing the public package cannot enroll an account or
+activate a connector supplied by somebody else's overlay.
 
 Runtime configuration is strict JSON. On Unix, the file must not be accessible
 by group or other users. Unknown fields, duplicate source identifiers, unknown
@@ -48,3 +53,6 @@ with preview, volume limit, retention validation, and confirmation.
 
 Credentials will be referenced through a deployment secret store. They will not
 be accepted inline in a tracked source configuration.
+
+See [connector-plugins.md](connector-plugins.md) for the registration contract
+and the mandatory non-admitting preview gate.

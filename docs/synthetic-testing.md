@@ -26,6 +26,9 @@ directory while no fabric process is running.
 
 ```bash
 npm run fabric -- sources list --config "$CAIRN_FABRIC_CONFIG"
+npm run fabric -- sources preview \
+  --source mock --config "$CAIRN_FABRIC_CONFIG"
+npm run fabric -- sources list --config "$CAIRN_FABRIC_CONFIG"
 npm run fabric -- ingest --once --config "$CAIRN_FABRIC_CONFIG"
 npm run fabric -- evidence list --config "$CAIRN_FABRIC_CONFIG"
 npm run fabric -- context get \
@@ -34,6 +37,10 @@ npm run fabric -- context get \
   --repository /fixture/project-alpha \
   --query "adapter interface"
 ```
+
+Preview validates the next batch and its payload digests without persisting
+evidence or advancing the source cursor. Both `sources list` calls therefore
+show the same cursor.
 
 The first ingestion admits a create event. The context packet contains one
 evidence section and one citation. The second ingestion replaces it with the
@@ -97,6 +104,7 @@ reviewed deployment supplies HTTPS and independent authentication controls.
 ## Safety properties under test
 
 - Payload bytes and SHA-256 must match before admission.
+- Preview does not persist evidence or advance a cursor, including on failure.
 - A failed batch does not advance its cursor.
 - Cursors and current evidence survive process restart.
 - Non-allowlisted containers fail admission.

@@ -8,9 +8,16 @@ import {
   type ContextRequest,
   type MemoryCandidate,
 } from "@cairnkeep/context-contracts";
-import { runConnectorOnce, type ConnectorBatch } from "@cairnkeep/connector-sdk";
+import {
+  pullConnectorBatch,
+  runConnectorOnce,
+  verifyConnectorPayloads,
+  type ConnectorBatch,
+  type ConnectorRegistration,
+  type EvidenceConnectorAdapter,
+} from "@cairnkeep/connector-sdk";
 
-import type { FabricConfig, SyntheticSourceConfig } from "./config.js";
+import type { FabricConfig, FabricSourceConfig, SyntheticSourceConfig } from "./config.js";
 import {
   FabricLedger,
   type CandidateProposal,
@@ -20,32 +27,67 @@ import {
 import { SyntheticConnector } from "./synthetic-connector.js";
 
 type SourceRuntime = {
-  config: SyntheticSourceConfig;
-  connector: SyntheticConnector;
+  config: FabricSourceConfig;
+  connector: EvidenceConnectorAdapter;
 };
 
 export type SourceStatus = {
   id: string;
-  type: "synthetic";
+  type: string;
   enabled: boolean;
   containers: string[];
   cursor?: string;
 };
+
+export type SourcePreview = {
+  sourceId: string;
+  type: string;
+  caughtUp: boolean;
+  currentCursor?: string;
+  nextCursor?: string;
+  events: Array<{
+    eventId: string;
+    operation: string;
+    container: string;
+    item: string;
+    revision?: string;
+    occurredAt: string;
+    bytes?: number;
+  }>;
+};
+
+function syntheticSource(source: FabricSourceConfig): source is SyntheticSourceConfig {
+  return source.type === "synthetic" && "fixturePath" in source;
+}
 
 export class FabricRuntime {
   readonly #config: FabricConfig;
   readonly #ledger: FabricLedger;
   readonly #sources: Map<string, SourceRuntime>;
 
-  constructor(config: FabricConfig) {
+  constructor(config: FabricConfig, registrations: readonly ConnectorRegistration[] = []) {
     this.#config = config;
+    const registered = new Map<string, ConnectorRegistration>();
+    for (const registration of registrations) {
+      if (registered.has(registration.type)) {
+        throw new Error(`Duplicate connector registration: ${registration.type}`);
+      }
+      registered.set(registration.type, registration);
+    }
+    const sources = new Map(config.sources.map((source) => {
+      const connector = syntheticSource(source)
+        ? new SyntheticConnector(source)
+        : registered.get(source.type)?.create(source);
+      if (connector === undefined) throw new Error(`No connector registered for source type: ${source.type}`);
+      if (connector.id !== source.id) {
+        throw new Error(`Connector for source ${source.id} returned id ${connector.id}.`);
+      }
+      return [source.id, { config: source, connector }];
+    }));
     mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
     chmodSync(config.dataDir, 0o700);
     this.#ledger = new FabricLedger(join(config.dataDir, "fabric.sqlite"));
-    this.#sources = new Map(config.sources.map((source) => [source.id, {
-      config: source,
-      connector: new SyntheticConnector(source),
-    }]));
+    this.#sources = sources;
   }
 
   close(): void {
@@ -81,20 +123,42 @@ export class FabricRuntime {
         cursors: this.#ledger,
         limit: source.config.batchSize,
         admit: async (events) => {
-          for (const event of events) {
-            if (event.deploymentId !== this.#config.deploymentId) {
-              throw new Error(`Source ${source.config.id} emitted a different deployment id.`);
-            }
-            if (!allowed.has(event.source.container)) {
-              throw new Error(`Source ${source.config.id} emitted a non-allowlisted container.`);
-            }
-          }
+          this.#validateEvents(source, events, allowed);
           await this.#ledger.admit(events, (payloadRef) => source.connector.payload(payloadRef));
         },
       });
       results.push({ sourceId: source.config.id, batch });
     }
     return results;
+  }
+
+  async preview(sourceId: string): Promise<SourcePreview> {
+    const source = this.#source(sourceId);
+    const currentCursor = await this.#ledger.get(source.config.id);
+    const batch = await pullConnectorBatch({
+      connector: source.connector,
+      ...(currentCursor === undefined ? {} : { cursor: currentCursor }),
+      limit: source.config.batchSize,
+    });
+    this.#validateEvents(source, batch.events, new Set(source.config.containers));
+    await verifyConnectorPayloads(source.connector, batch.events);
+    const preview: SourcePreview = {
+      sourceId: source.config.id,
+      type: source.config.type,
+      caughtUp: batch.caughtUp,
+      events: batch.events.map((event) => ({
+        eventId: event.eventId,
+        operation: event.operation,
+        container: event.source.container,
+        item: event.source.item,
+        ...(event.source.revision === undefined ? {} : { revision: event.source.revision }),
+        occurredAt: event.occurredAt,
+        ...(event.content === undefined ? {} : { bytes: event.content.bytes }),
+      })),
+    };
+    if (currentCursor !== undefined) preview.currentCursor = currentCursor;
+    if (batch.nextCursor !== undefined) preview.nextCursor = batch.nextCursor;
+    return preview;
   }
 
   context(request: ContextRequest, principalId = this.#config.principalId): ContextPacket {
@@ -135,5 +199,20 @@ export class FabricRuntime {
     const source = this.#sources.get(id);
     if (source === undefined) throw new Error(`Unknown source: ${id}`);
     return source;
+  }
+
+  #validateEvents(
+    source: SourceRuntime,
+    events: readonly ConnectorBatch["events"][number][],
+    allowed: ReadonlySet<string>,
+  ): void {
+    for (const event of events) {
+      if (event.deploymentId !== this.#config.deploymentId) {
+        throw new Error(`Source ${source.config.id} emitted a different deployment id.`);
+      }
+      if (!allowed.has(event.source.container)) {
+        throw new Error(`Source ${source.config.id} emitted a non-allowlisted container.`);
+      }
+    }
   }
 }

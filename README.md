@@ -12,7 +12,8 @@ Pre-alpha synthetic vertical slice. The repository defines protocol contracts,
 an authenticated client, a connector SDK, a mode-0600 deployment configuration,
 a durable SQLite evidence ledger, incremental synthetic ingestion, lifecycle-
 aware authorization, cited context retrieval, a durable human-review candidate
-queue, and a loopback-first service.
+queue, an explicitly registered connector plug-in boundary, non-admitting source
+preview, and a loopback-first service.
 
 It does not include live connectors, schedulers, model calls, compiled knowledge,
 automatic candidate extraction, candidate editing, memory promotion, or
@@ -68,6 +69,8 @@ the boundary between public schemas and private selections are documented in
 [docs/source-configuration.md](docs/source-configuration.md).
 Candidate review and its deliberately disconnected promotion boundary are
 documented in [docs/candidate-review.md](docs/candidate-review.md).
+Deployment-owned connector registration and preview gates are documented in
+[docs/connector-plugins.md](docs/connector-plugins.md).
 
 The workspace is private while the protocol is pre-alpha. Individual packages
 will become publishable only after the vertical spike freezes their first
