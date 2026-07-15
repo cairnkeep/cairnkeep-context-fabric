@@ -1,0 +1,128 @@
+{
+  "fixtureVersion": 1,
+  "description": "Synthetic create, update, access-change, and delete lifecycle",
+  "events": [
+    {
+      "schemaVersion": 1,
+      "eventId": "event-message-001-create",
+      "deliveryId": "delivery-001",
+      "deploymentId": "fixture",
+      "source": {
+        "connector": "mock",
+        "container": "project-alpha",
+        "item": "message-001",
+        "revision": "1"
+      },
+      "operation": "create",
+      "occurredAt": "2026-01-01T10:00:00Z",
+      "observedAt": "2026-01-01T10:00:01Z",
+      "authorId": "developer-a",
+      "content": {
+        "mimeType": "text/plain",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "payloadRef": "fixture://payload/message-001/revision-1",
+        "bytes": 72
+      },
+      "access": {
+        "version": "acl-1",
+        "readers": ["developer-a", "developer-b"],
+        "denied": [],
+        "classification": "synthetic"
+      },
+      "retention": {
+        "class": "fixture"
+      },
+      "metadata": {
+        "thread": "thread-001"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "eventId": "event-message-001-update",
+      "deliveryId": "delivery-002",
+      "deploymentId": "fixture",
+      "source": {
+        "connector": "mock",
+        "container": "project-alpha",
+        "item": "message-001",
+        "revision": "2"
+      },
+      "operation": "update",
+      "occurredAt": "2026-01-01T10:05:00Z",
+      "observedAt": "2026-01-01T10:05:01Z",
+      "authorId": "developer-a",
+      "content": {
+        "mimeType": "text/plain",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "payloadRef": "fixture://payload/message-001/revision-2",
+        "bytes": 89
+      },
+      "access": {
+        "version": "acl-1",
+        "readers": ["developer-a", "developer-b"],
+        "denied": [],
+        "classification": "synthetic"
+      },
+      "retention": {
+        "class": "fixture"
+      },
+      "metadata": {
+        "thread": "thread-001"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "eventId": "event-message-001-access-change",
+      "deliveryId": "delivery-003",
+      "deploymentId": "fixture",
+      "source": {
+        "connector": "mock",
+        "container": "project-alpha",
+        "item": "message-001",
+        "revision": "2"
+      },
+      "operation": "access-change",
+      "occurredAt": "2026-01-01T10:10:00Z",
+      "observedAt": "2026-01-01T10:10:01Z",
+      "access": {
+        "version": "acl-2",
+        "readers": ["developer-a"],
+        "denied": ["developer-b"],
+        "classification": "synthetic"
+      },
+      "retention": {
+        "class": "fixture"
+      },
+      "metadata": {
+        "thread": "thread-001"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "eventId": "event-message-001-delete",
+      "deliveryId": "delivery-004",
+      "deploymentId": "fixture",
+      "source": {
+        "connector": "mock",
+        "container": "project-alpha",
+        "item": "message-001",
+        "revision": "3"
+      },
+      "operation": "delete",
+      "occurredAt": "2026-01-01T10:15:00Z",
+      "observedAt": "2026-01-01T10:15:01Z",
+      "access": {
+        "version": "acl-3",
+        "readers": [],
+        "denied": ["developer-a", "developer-b"],
+        "classification": "synthetic"
+      },
+      "retention": {
+        "class": "fixture"
+      },
+      "metadata": {
+        "thread": "thread-001"
+      }
+    }
+  ]
+}
