@@ -69,7 +69,8 @@ cairn-fabric sources preview --source SOURCE_ID --config PRIVATE_CONFIG
 Preview contacts the source and fetches the next batch. It validates schemas,
 deployment identity, container allowlists, duplicate identifiers, batch bounds,
 and payload byte counts and SHA-256 digests. Output contains lifecycle metadata,
-not source payload text. Preview never writes evidence and never advances the
+not source payload text or opaque cursor values. Status and preview expose only
+cursor-presence booleans. Preview never writes evidence and never advances the
 durable cursor, even when validation fails.
 
 ## Deployment review
