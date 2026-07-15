@@ -16,9 +16,11 @@
 ## Fail-closed invariants
 
 - Evidence without a confirmed access decision is not retrievable.
+- Evidence from a connector without a successful availability state is not retrievable.
 - A revoked or deleted item is blocked before background reconciliation.
 - A claim without an admissible evidence path is not returned as fact.
 - Cursor advancement occurs only after the complete batch is durably admitted.
+- Connector failure marks the source unavailable; only a later successful run restores it.
 - A failed compilation does not publish a partial set of pages.
 
 ## Storage placement

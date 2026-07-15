@@ -169,12 +169,14 @@ test("verifies payload bytes and digest before preview or admission", async () =
 });
 
 test("defines registrations with validated common source configuration", () => {
+  let receivedDeployment: string | undefined;
   const registration = defineConnectorRegistration({
     type: "fixture-plugin",
     parseConfig(value) {
       return ConnectorSourceConfigSchema.parse(value);
     },
-    create(config) {
+    create(config, context) {
+      receivedDeployment = context.deploymentId;
       return {
         id: config.id,
         async pull() {
@@ -193,7 +195,13 @@ test("defines registrations with validated common source configuration", () => {
   }, { baseDir: "/fixture" });
   assert.equal(config.enabled, false);
   assert.equal(config.batchSize, 100);
-  assert.equal(registration.create(config).id, "fixture-source");
+  assert.equal(config.healthTtlSeconds, 900);
+  assert.equal(registration.create(config, {
+    deploymentId: "fixture",
+    principalId: "developer-a",
+    dataDir: "/fixture/state",
+  }).id, "fixture-source");
+  assert.equal(receivedDeployment, "fixture");
   assert.throws(() => registration.parseConfig({
     id: "fixture-source",
     type: "other-plugin",

@@ -30,7 +30,8 @@ source types, and containers outside the explicit allowlist are rejected.
       "enabled": true,
       "fixturePath": "../tests/fixtures/evidence-lifecycle.json",
       "containers": ["project-alpha"],
-      "batchSize": 1
+      "batchSize": 1,
+      "healthTtlSeconds": 900
     }
   ]
 }
@@ -39,6 +40,11 @@ source types, and containers outside the explicit allowlist are rejected.
 `HOME` and `XDG_DATA_HOME` are the only supported path variables. Relative paths
 resolve from the configuration file. Runtime databases belong under private XDG
 data storage, never in a project repository.
+
+`healthTtlSeconds` bounds how long evidence remains usable after a complete
+successful source run. It defaults to 900 seconds and must be between 60 seconds
+and 24 hours. Schedule ingestion more frequently than the lease; an expired
+lease withholds that source until a successful run renews it.
 
 ## Future deployment ownership
 

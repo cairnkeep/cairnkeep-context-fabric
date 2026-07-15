@@ -63,6 +63,12 @@ type CandidateRow = {
   candidate_json: string;
 };
 
+export type ConnectorAvailability = {
+  available: boolean;
+  checkedAt?: string;
+  expiresAt?: string;
+};
+
 function evidenceId(event: EvidenceEvent): string {
   const identity = [
     event.deploymentId,
@@ -110,6 +116,12 @@ export class FabricLedger implements CursorStore {
         connector_id TEXT PRIMARY KEY,
         cursor TEXT NOT NULL
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS connector_health (
+        connector_id TEXT PRIMARY KEY,
+        available INTEGER NOT NULL CHECK (available IN (0, 1)),
+        checked_at TEXT NOT NULL,
+        available_until TEXT
+      ) STRICT;
       CREATE TABLE IF NOT EXISTS evidence_events (
         event_id TEXT PRIMARY KEY,
         delivery_id TEXT NOT NULL UNIQUE,
@@ -152,6 +164,12 @@ export class FabricLedger implements CursorStore {
       CREATE INDEX IF NOT EXISTS candidate_evidence_evidence
         ON candidate_evidence (evidence_id, candidate_id);
     `);
+    const healthColumns = this.#database.prepare(
+      "SELECT name FROM pragma_table_info('connector_health')",
+    ).all() as unknown as Array<{ name: string }>;
+    if (!healthColumns.some((column) => column.name === "available_until")) {
+      this.#database.exec("ALTER TABLE connector_health ADD COLUMN available_until TEXT");
+    }
   }
 
   close(): void {
@@ -174,6 +192,54 @@ export class FabricLedger implements CursorStore {
 
   async clear(connectorId: string): Promise<void> {
     this.#database.prepare("DELETE FROM connector_cursors WHERE connector_id = ?").run(connectorId);
+  }
+
+  connectorAvailability(connectorId: string, now = new Date()): ConnectorAvailability {
+    const row = this.#database.prepare(`
+      SELECT available, checked_at, available_until
+      FROM connector_health WHERE connector_id = ?
+    `).get(connectorId) as {
+      available: number;
+      checked_at: string;
+      available_until: string | null;
+    } | undefined;
+    if (row === undefined) return { available: false };
+    const current = row.available === 1
+      && row.available_until !== null
+      && Date.parse(row.available_until) > now.getTime();
+    return {
+      available: current,
+      checkedAt: row.checked_at,
+      ...(row.available_until === null ? {} : { expiresAt: row.available_until }),
+    };
+  }
+
+  setConnectorAvailability(
+    connectorId: string,
+    available: boolean,
+    now = new Date(),
+    ttlSeconds = 900,
+  ): void {
+    const availableUntil = available
+      ? new Date(now.getTime() + ttlSeconds * 1000).toISOString()
+      : null;
+    this.#database.prepare(`
+      INSERT INTO connector_health (
+        connector_id, available, checked_at, available_until
+      ) VALUES (?, ?, ?, ?)
+      ON CONFLICT(connector_id) DO UPDATE SET
+        available = excluded.available,
+        checked_at = excluded.checked_at,
+        available_until = excluded.available_until
+    `).run(connectorId, available ? 1 : 0, now.toISOString(), availableUntil);
+  }
+
+  #connectorAvailable(connectorId: string, now: Date): boolean {
+    return this.connectorAvailability(connectorId, now).available;
+  }
+
+  #usable(row: CurrentRow, principalId: string, now: Date): boolean {
+    return authorized(row, principalId, now) && this.#connectorAvailable(row.connector, now);
   }
 
   async admit(events: readonly EvidenceEvent[], resolvePayload: PayloadResolver): Promise<void> {
@@ -308,8 +374,8 @@ export class FabricLedger implements CursorStore {
       throw new Error("Candidate evidence must exist in the current ledger.");
     }
     const evidence = rows as CurrentRow[];
-    if (evidence.some((row) => !authorized(row, principalId, now) || row.payload === null)) {
-      throw new Error("Candidate evidence must be active, unexpired, and accessible.");
+    if (evidence.some((row) => !this.#usable(row, principalId, now) || row.payload === null)) {
+      throw new Error("Candidate evidence must be active, unexpired, and accessible, with an available source.");
     }
     const deployments = new Set(evidence.map((row) => row.deployment_id));
     if (deployments.size !== 1) throw new Error("Candidate evidence must share one deployment.");
@@ -376,6 +442,7 @@ export class FabricLedger implements CursorStore {
       : new Set(states.map((state) => CandidateStateSchema.parse(state)));
     return rows
       .filter((row) => stateFilter === undefined || stateFilter.has(row.state))
+      .filter((row) => this.#candidateSourcesAvailable(row.candidate_id, now))
       .map((row) => MemoryCandidateSchema.parse(JSON.parse(row.candidate_json)));
   }
 
@@ -391,6 +458,9 @@ export class FabricLedger implements CursorStore {
       FROM memory_candidates WHERE candidate_id = ? AND principal_id = ?
     `).get(candidateId, principalId) as CandidateRow | undefined;
     if (row === undefined) throw new Error(`Unknown candidate: ${candidateId}.`);
+    if (!this.#candidateSourcesAvailable(candidateId, now)) {
+      throw new Error(`Candidate source is unavailable: ${candidateId}.`);
+    }
     if (row.state === "invalid") throw new Error(`Candidate is invalid: ${candidateId}.`);
     if (row.state === "approved" || row.state === "rejected") {
       throw new Error(`Candidate review is already final: ${candidateId}.`);
@@ -420,6 +490,24 @@ export class FabricLedger implements CursorStore {
         this.#deleteCandidate(candidateId);
       }
     }
+  }
+
+  #candidateSourcesAvailable(candidateId: string, now: Date): boolean {
+    const rows = this.#database.prepare(`
+      SELECT connector_health.available, connector_health.available_until
+      FROM candidate_evidence
+      JOIN evidence_current USING (evidence_id)
+      LEFT JOIN connector_health ON connector_health.connector_id = evidence_current.connector
+      WHERE candidate_id = ?
+    `).all(candidateId) as unknown as Array<{
+      available: number | null;
+      available_until: string | null;
+    }>;
+    return rows.length > 0 && rows.every((row) =>
+      row.available === 1
+      && row.available_until !== null
+      && Date.parse(row.available_until) > now.getTime()
+    );
   }
 
   #reconcileCandidatesForEvidence(id: string, now: Date): void {
@@ -475,7 +563,10 @@ export class FabricLedger implements CursorStore {
       ORDER BY occurred_at DESC, evidence_id ASC
     `).all(request.deploymentId, request.projectId) as unknown as CurrentRow[];
     const terms = queryTerms(request);
-    const admissible = rows.filter((row) => authorized(row, principalId, now) && row.payload !== null);
+    const unavailable = rows.some((row) =>
+      authorized(row, principalId, now) && !this.#connectorAvailable(row.connector, now)
+    );
+    const admissible = rows.filter((row) => this.#usable(row, principalId, now) && row.payload !== null);
     const ranked = admissible.sort((left, right) => {
       const score = (row: CurrentRow): number => {
         const haystack = `${row.payload ?? ""} ${row.metadata_json}`.toLowerCase();
@@ -521,7 +612,7 @@ export class FabricLedger implements CursorStore {
       citations,
       totalTokenEstimate,
       truncated,
-      warnings: [],
+      warnings: unavailable ? ["Evidence withheld because a source is unavailable."] : [],
     };
   }
 
@@ -530,14 +621,14 @@ export class FabricLedger implements CursorStore {
       "SELECT * FROM evidence_current ORDER BY occurred_at DESC, evidence_id ASC",
     ).all() as unknown as CurrentRow[];
     return rows
-      .filter((row) => includeInactive || authorized(row, principalId, now))
+      .filter((row) => includeInactive || this.#usable(row, principalId, now))
       .map((row) => {
         const summary: EvidenceSummary = {
           evidenceId: row.evidence_id,
           source: sourceLocator(row),
           state: row.state,
           occurredAt: row.occurred_at,
-          accessible: authorized(row, principalId, now),
+          accessible: this.#usable(row, principalId, now),
           metadata: JSON.parse(row.metadata_json) as Record<string, string>,
         };
         if (row.revision !== null) summary.revision = row.revision;

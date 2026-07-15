@@ -15,12 +15,19 @@ export const ConnectorSourceConfigSchema = z.object({
   enabled: z.boolean().default(false),
   containers: z.array(z.string().min(1).max(256)).min(1).max(128),
   batchSize: z.number().int().min(1).max(1000).default(100),
+  healthTtlSeconds: z.number().int().min(60).max(86_400).default(900),
 }).passthrough();
 
 export type ConnectorSourceConfig = z.infer<typeof ConnectorSourceConfigSchema>;
 
 export type ConnectorConfigContext = {
   baseDir: string;
+};
+
+export type ConnectorRuntimeContext = {
+  deploymentId: string;
+  principalId: string;
+  dataDir: string;
 };
 
 export type ConnectorPullRequest = {
@@ -47,13 +54,16 @@ export interface EvidenceConnectorAdapter extends ConnectorAdapter {
 export type ConnectorRegistration = {
   readonly type: string;
   parseConfig(value: unknown, context: ConnectorConfigContext): ConnectorSourceConfig;
-  create(config: ConnectorSourceConfig): EvidenceConnectorAdapter;
+  create(
+    config: ConnectorSourceConfig,
+    context: ConnectorRuntimeContext,
+  ): EvidenceConnectorAdapter;
 };
 
 type TypedConnectorRegistration<TConfig extends ConnectorSourceConfig> = {
   readonly type: string;
   parseConfig(value: unknown, context: ConnectorConfigContext): TConfig;
-  create(config: TConfig): EvidenceConnectorAdapter;
+  create(config: TConfig, context: ConnectorRuntimeContext): EvidenceConnectorAdapter;
 };
 
 export function defineConnectorRegistration<TConfig extends ConnectorSourceConfig>(
@@ -70,8 +80,8 @@ export function defineConnectorRegistration<TConfig extends ConnectorSourceConfi
       }
       return common as TConfig;
     },
-    create(config) {
-      return registration.create(config as TConfig);
+    create(config, context) {
+      return registration.create(config as TConfig, context);
     },
   };
 }

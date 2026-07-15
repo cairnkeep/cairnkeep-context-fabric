@@ -35,8 +35,11 @@ export type SourceStatus = {
   id: string;
   type: string;
   enabled: boolean;
+  available: boolean;
   containers: string[];
   cursor?: string;
+  checkedAt?: string;
+  healthExpiresAt?: string;
 };
 
 export type SourcePreview = {
@@ -77,7 +80,11 @@ export class FabricRuntime {
     const sources = new Map(config.sources.map((source) => {
       const connector = syntheticSource(source)
         ? new SyntheticConnector(source)
-        : registered.get(source.type)?.create(source);
+        : registered.get(source.type)?.create(source, {
+          deploymentId: config.deploymentId,
+          principalId: config.principalId,
+          dataDir: config.dataDir,
+        });
       if (connector === undefined) throw new Error(`No connector registered for source type: ${source.type}`);
       if (connector.id !== source.id) {
         throw new Error(`Connector for source ${source.id} returned id ${connector.id}.`);
@@ -88,6 +95,9 @@ export class FabricRuntime {
     chmodSync(config.dataDir, 0o700);
     this.#ledger = new FabricLedger(join(config.dataDir, "fabric.sqlite"));
     this.#sources = sources;
+    for (const source of sources.values()) {
+      if (!source.config.enabled) this.#ledger.setConnectorAvailability(source.config.id, false);
+    }
   }
 
   close(): void {
@@ -101,8 +111,13 @@ export class FabricRuntime {
         id: source.config.id,
         type: source.config.type,
         enabled: source.config.enabled,
+        available: false,
         containers: [...source.config.containers],
       };
+      const health = this.#ledger.connectorAvailability(source.config.id);
+      status.available = health.available;
+      if (health.checkedAt !== undefined) status.checkedAt = health.checkedAt;
+      if (health.expiresAt !== undefined) status.healthExpiresAt = health.expiresAt;
       const cursor = await this.#ledger.get(source.config.id);
       if (cursor !== undefined) status.cursor = cursor;
       statuses.push(status);
@@ -118,16 +133,27 @@ export class FabricRuntime {
     for (const source of selected) {
       if (!source.config.enabled) throw new Error(`Source is disabled: ${source.config.id}`);
       const allowed = new Set(source.config.containers);
-      const batch = await runConnectorOnce({
-        connector: source.connector,
-        cursors: this.#ledger,
-        limit: source.config.batchSize,
-        admit: async (events) => {
-          this.#validateEvents(source, events, allowed);
-          await this.#ledger.admit(events, (payloadRef) => source.connector.payload(payloadRef));
-        },
-      });
-      results.push({ sourceId: source.config.id, batch });
+      try {
+        const batch = await runConnectorOnce({
+          connector: source.connector,
+          cursors: this.#ledger,
+          limit: source.config.batchSize,
+          admit: async (events) => {
+            this.#validateEvents(source, events, allowed);
+            await this.#ledger.admit(events, (payloadRef) => source.connector.payload(payloadRef));
+          },
+        });
+        this.#ledger.setConnectorAvailability(
+          source.config.id,
+          true,
+          new Date(),
+          source.config.healthTtlSeconds,
+        );
+        results.push({ sourceId: source.config.id, batch });
+      } catch (error) {
+        this.#ledger.setConnectorAvailability(source.config.id, false);
+        throw error;
+      }
     }
     return results;
   }
