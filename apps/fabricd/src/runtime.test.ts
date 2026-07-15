@@ -48,6 +48,7 @@ function fixturePlugin(): ConnectorRegistration {
         fixturePath: config.fixturePath,
         containers: config.containers,
         batchSize: config.batchSize,
+        healthTtlSeconds: config.healthTtlSeconds,
       });
     },
   });
@@ -185,6 +186,7 @@ test("persists cursors and fails closed across the complete evidence lifecycle",
       id: "mock",
       type: "synthetic",
       enabled: true,
+      available: false,
       containers: ["project-alpha"],
     }]);
 
@@ -211,6 +213,124 @@ test("persists cursors and fails closed across the complete evidence lifecycle",
     assert.deepEqual(runtime.evidence(true).map((item) => [item.state, item.accessible]), [["deleted", false]]);
     assert.equal((await runtime.sources())[0]?.cursor, "4");
     runtime.close();
+  });
+});
+
+test("withholds evidence and candidates while a connector is unavailable", async () => {
+  await withConfig(async (configPath) => {
+    const raw = JSON.parse(readFileSync(configPath, "utf8")) as {
+      sources: Array<Record<string, unknown>>;
+    };
+    raw.sources[0]!.type = "fixture-plugin";
+    writeFileSync(configPath, JSON.stringify(raw));
+    chmodSync(configPath, 0o600);
+
+    const control = { fail: false };
+    const registration = defineConnectorRegistration<FixturePluginConfig>({
+      type: "fixture-plugin",
+      parseConfig(value) {
+        const common = ConnectorSourceConfigSchema.parse(value);
+        return { ...common, fixturePath };
+      },
+      create(config, context) {
+        assert.equal(context.deploymentId, "fixture");
+        assert.equal(context.principalId, "developer-a");
+        const connector = new SyntheticConnector({
+          id: config.id,
+          type: "synthetic",
+          enabled: config.enabled,
+          fixturePath: config.fixturePath,
+          containers: config.containers,
+          batchSize: config.batchSize,
+          healthTtlSeconds: config.healthTtlSeconds,
+        });
+        return {
+          id: config.id,
+          async pull(request) {
+            if (control.fail) throw new Error("source authentication unavailable");
+            if (request.cursor !== undefined) {
+              return { events: [], nextCursor: request.cursor, caughtUp: true };
+            }
+            return connector.pull(request);
+          },
+          payload(payloadRef) {
+            return connector.payload(payloadRef);
+          },
+        };
+      },
+    });
+    const config = loadFabricConfig(configPath, [registration]);
+    const runtime = new FabricRuntime(config, [registration]);
+
+    await runtime.ingestOnce();
+    assert.equal((await runtime.sources())[0]?.available, true);
+    const evidenceId = runtime.evidence()[0]!.evidenceId;
+    const candidate = runtime.proposeCandidate({
+      proposedScope: "project",
+      proposedKey: "decisions/adapter-interface",
+      proposedValue: "Use the stable adapter interface.",
+      evidenceIds: [evidenceId],
+      confidence: 0.8,
+      rationale: "The source records the current project decision.",
+    });
+    runtime.reviewCandidate(candidate.candidateId, "approve");
+
+    control.fail = true;
+    await assert.rejects(runtime.ingestOnce(), /source authentication unavailable/);
+    assert.equal((await runtime.sources())[0]?.available, false);
+    assert.equal(runtime.context(request()).sections.length, 0);
+    assert.deepEqual(
+      runtime.context(request()).warnings,
+      ["Evidence withheld because a source is unavailable."],
+    );
+    assert.equal(runtime.evidence(true)[0]?.accessible, false);
+    assert.deepEqual(runtime.candidates(), []);
+    assert.throws(
+      () => runtime.reviewCandidate(candidate.candidateId, "approve"),
+      /Candidate source is unavailable/,
+    );
+
+    control.fail = false;
+    await runtime.ingestOnce();
+    assert.equal((await runtime.sources())[0]?.available, true);
+    assert.equal(runtime.context(request()).sections.length, 1);
+    assert.equal(runtime.candidates()[0]?.state, "approved");
+    runtime.close();
+  });
+});
+
+test("expires source health leases without destroying reviewed candidates", async () => {
+  await withConfig(async (configPath) => {
+    const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as {
+      events: unknown[];
+      payloads: Record<string, string>;
+    };
+    const event = EvidenceEventSchema.parse(fixture.events[0]);
+    const ledger = new FabricLedger(join(configPath, "..", "health-lease.sqlite"));
+    await ledger.admit([event], async (payloadRef) => fixture.payloads[payloadRef]!);
+    const checkedAt = new Date("2026-01-02T00:00:00Z");
+    ledger.setConnectorAvailability("mock", true, checkedAt, 60);
+    const beforeExpiry = new Date("2026-01-02T00:00:59Z");
+    const evidenceId = ledger.listEvidence("developer-a", false, beforeExpiry)[0]!.evidenceId;
+    const candidate = ledger.proposeCandidate({
+      proposedScope: "project",
+      proposedKey: "decisions/adapter-interface",
+      proposedValue: "Use the stable adapter interface.",
+      evidenceIds: [evidenceId],
+      confidence: 0.8,
+      rationale: "The source records the current project decision.",
+    }, "developer-a", beforeExpiry);
+    ledger.reviewCandidate(candidate.candidateId, "approve", "developer-a", beforeExpiry);
+
+    const afterExpiry = new Date("2026-01-02T00:01:01Z");
+    assert.deepEqual(ledger.listEvidence("developer-a", false, afterExpiry), []);
+    assert.equal(ledger.listEvidence("developer-a", true, afterExpiry)[0]?.accessible, false);
+    assert.deepEqual(ledger.listCandidates("developer-a", undefined, afterExpiry), []);
+
+    ledger.setConnectorAvailability("mock", true, afterExpiry, 60);
+    assert.equal(ledger.listEvidence("developer-a", false, afterExpiry).length, 1);
+    assert.equal(ledger.listCandidates("developer-a", undefined, afterExpiry)[0]?.state, "approved");
+    ledger.close();
   });
 });
 
@@ -311,6 +431,7 @@ test("invalidates candidates when supporting evidence reaches retention expiry",
     });
     const ledger = new FabricLedger(join(configPath, "..", "candidate-expiry.sqlite"));
     await ledger.admit([event], async (payloadRef) => fixture.payloads[payloadRef]!);
+    ledger.setConnectorAvailability("mock", true);
     const evidenceId = ledger.listEvidence("developer-a", false, new Date("2026-01-02T00:00:00Z"))[0]!.evidenceId;
     const candidate = ledger.proposeCandidate({
       proposedScope: "project",
@@ -366,6 +487,7 @@ test("replays committed events without fetching their payload again", async () =
     const event = EvidenceEventSchema.parse(fixture.events[0]);
     const ledger = new FabricLedger(join(configPath, "..", "replay.sqlite"));
     await ledger.admit([event], async (payloadRef) => fixture.payloads[payloadRef]!);
+    ledger.setConnectorAvailability("mock", true);
     await ledger.admit([event], async () => {
       throw new Error("replayed payload must not be fetched");
     });

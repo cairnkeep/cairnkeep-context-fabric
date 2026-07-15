@@ -26,6 +26,7 @@
 | Excessive collection | Explicit source allowlist and least privilege before ingestion |
 | Replay or reordering | Stable delivery IDs, idempotency, monotonic source revision rules |
 | Access revocation lag | Query-time access check and fail-closed invalidation |
+| Stale source authentication | Persisted connector health; evidence withheld after any failed run |
 | Source deletion leakage | Tombstones, index removal, dependent-claim reconciliation |
 | Cross-deployment leakage | Separate credentials, keys, databases, indexes, and logs |
 | Secret disclosure | Environment-backed secrets, redacted errors, package-content checks |

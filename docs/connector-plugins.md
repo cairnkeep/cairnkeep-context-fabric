@@ -23,8 +23,8 @@ const registration = defineConnectorRegistration({
     // relative to context.baseDir.
     return common;
   },
-  create(config) {
-    return createDeploymentConnector(config);
+  create(config, runtime) {
+    return createDeploymentConnector(config, runtime);
   },
 });
 
@@ -32,14 +32,25 @@ const result = await runFabricOperator(process.argv.slice(2), [registration]);
 process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 ```
 
-The adapter must implement `pull()` and `payload()`. Common configuration fixes
-the source ID, type, enabled state, explicit container allowlist, and maximum
-batch size. Connector-specific parsing cannot change those fields. Both
+The adapter must implement `pull()` and `payload()`. The runtime context passed
+to `create()` supplies the deployment ID, principal ID, and private data
+directory so an overlay does not duplicate or hardcode deployment identity.
+Common configuration fixes the source ID, type, enabled state, explicit
+container allowlist, maximum batch size, and a bounded health-lease duration.
+Connector-specific parsing cannot change those fields. Both
 `parseConfig()` and `create()` must be side-effect free: they do not authenticate,
 contact a source, start background work, or resolve secret values. Only an
 explicit `pull()` or `payload()` operation may contact the source. The adapter
 emits normalized evidence events and must propagate updates, deletions, expiry,
 and access changes from the source.
+
+The runtime persists connector availability separately from evidence lifecycle.
+Only a complete successful ingestion attempt marks a source available. Any pull,
+validation, payload, admission, or cursor failure marks it unavailable and
+immediately withholds its evidence and evidence-backed candidates. A later
+successful attempt restores visibility without destroying candidates during a
+transient outage. The default lease is 15 minutes and expires fail-closed if no
+successful run renews it. Preview never changes availability.
 
 Inline credential fields are rejected before connector-specific parsing. A
 configuration may contain an environment-variable name or secret-store
@@ -68,6 +79,7 @@ Before enabling ingestion, the overlay must independently verify:
 - immutable container identifiers and an explicit allowlist;
 - credentials referenced from a secret store rather than tracked configuration;
 - pagination, retry, rate-limit, replay, and monotonic revision behavior;
+- an ingestion schedule comfortably shorter than the configured health lease;
 - deletion, retention expiry, and access-revocation propagation;
 - no payload, credential, or private identifier logging;
 - preview volume and classification against deployment policy;

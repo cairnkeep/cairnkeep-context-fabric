@@ -18,6 +18,7 @@ const SyntheticSourceSchema = z.object({
   fixturePath: z.string().min(1),
   containers: z.array(z.string().min(1).max(256)).min(1).max(128),
   batchSize: z.number().int().min(1).max(1000).default(1),
+  healthTtlSeconds: z.number().int().min(60).max(86_400).default(900),
 }).strict();
 
 export const FabricConfigSchema = z.object({
@@ -127,7 +128,7 @@ export function loadFabricConfig(
     const configuredCommon = ConnectorSourceConfigSchema.parse(value);
     const source = registration.parseConfig(value, { baseDir: base });
     const common = ConnectorSourceConfigSchema.parse(source);
-    const policyFields = ["id", "type", "enabled", "batchSize"] as const;
+    const policyFields = ["id", "type", "enabled", "batchSize", "healthTtlSeconds"] as const;
     if (
       policyFields.some((field) => common[field] !== configuredCommon[field])
       || JSON.stringify(common.containers) !== JSON.stringify(configuredCommon.containers)
