@@ -35,7 +35,7 @@ test("negotiates capabilities through the authenticated client", async () => {
     const client = new ContextFabricClient({ baseUrl, token: TOKEN });
     const result = await client.capabilities();
     assert.equal(result.protocolVersion, "0.1");
-    assert.equal(result.serviceVersion, "0.3.0");
+    assert.equal(result.serviceVersion, "0.4.0");
     assert.equal(result.features.lifecycle, false);
   });
 });

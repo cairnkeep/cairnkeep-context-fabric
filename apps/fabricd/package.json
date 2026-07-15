@@ -1,11 +1,18 @@
 {
   "name": "@cairnkeep/fabricd",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Cairnkeep Context Fabric service",
   "license": "Apache-2.0",
   "type": "module",
-  "main": "dist/main.js",
+  "main": "dist/api.js",
+  "types": "dist/api.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/api.d.ts",
+      "import": "./dist/api.js"
+    }
+  },
   "bin": {
     "cairn-fabric": "dist/cli.js"
   },
@@ -18,7 +25,7 @@
   "dependencies": {
     "@cairnkeep/context-client": "0.1.0",
     "@cairnkeep/context-contracts": "0.1.0",
-    "@cairnkeep/connector-sdk": "0.1.0",
+    "@cairnkeep/connector-sdk": "0.2.0",
     "zod": "4.4.3"
   }
 }

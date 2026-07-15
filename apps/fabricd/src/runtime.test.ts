@@ -9,16 +9,49 @@ import test from "node:test";
 
 import { ContextFabricClient } from "@cairnkeep/context-client";
 import { EvidenceEventSchema } from "@cairnkeep/context-contracts";
+import {
+  ConnectorSourceConfigSchema,
+  defineConnectorRegistration,
+  type ConnectorRegistration,
+  type ConnectorSourceConfig,
+} from "@cairnkeep/connector-sdk";
 
 import { loadFabricConfig } from "./config.js";
 import { FabricLedger } from "./ledger.js";
 import { FabricRuntime } from "./runtime.js";
 import { createFabricServer } from "./server.js";
+import { SyntheticConnector } from "./synthetic-connector.js";
 
 const fixturePath = fileURLToPath(
   new URL("../../../tests/fixtures/evidence-lifecycle.json", import.meta.url),
 );
 const cliPath = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+
+type FixturePluginConfig = ConnectorSourceConfig & { fixturePath: string };
+
+function fixturePlugin(): ConnectorRegistration {
+  return defineConnectorRegistration<FixturePluginConfig>({
+    type: "fixture-plugin",
+    parseConfig(value) {
+      const common = ConnectorSourceConfigSchema.parse(value);
+      const fixture = value as { fixturePath?: unknown };
+      if (typeof fixture.fixturePath !== "string" || fixture.fixturePath.length === 0) {
+        throw new Error("fixturePath is required.");
+      }
+      return { ...common, fixturePath: fixture.fixturePath };
+    },
+    create(config) {
+      return new SyntheticConnector({
+        id: config.id,
+        type: "synthetic",
+        enabled: config.enabled,
+        fixturePath: config.fixturePath,
+        containers: config.containers,
+        batchSize: config.batchSize,
+      });
+    },
+  });
+}
 
 function withConfig(run: (configPath: string) => Promise<void>): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "cairn-fabric-runtime-"));
@@ -60,6 +93,87 @@ test("rejects deployment configuration readable by other users", async () => {
   await withConfig(async (configPath) => {
     chmodSync(configPath, 0o644);
     assert.throws(() => loadFabricConfig(configPath), /must not be accessible/);
+  });
+});
+
+test("loads only explicitly registered connector types and previews without admission", async () => {
+  await withConfig(async (configPath) => {
+    const raw = JSON.parse(readFileSync(configPath, "utf8")) as {
+      sources: Array<Record<string, unknown>>;
+    };
+    raw.sources[0]!.type = "fixture-plugin";
+    raw.sources[0]!.enabled = false;
+    writeFileSync(configPath, JSON.stringify(raw));
+    chmodSync(configPath, 0o600);
+
+    assert.throws(() => loadFabricConfig(configPath), /Unknown source type: fixture-plugin/);
+    const registration = fixturePlugin();
+    const config = loadFabricConfig(configPath, [registration]);
+    const runtime = new FabricRuntime(config, [registration]);
+    const preview = await runtime.preview("mock");
+    assert.equal(preview.type, "fixture-plugin");
+    assert.equal(preview.currentCursor, undefined);
+    assert.equal(preview.nextCursor, "1");
+    assert.equal(preview.events[0]?.operation, "create");
+    assert.equal((await runtime.sources())[0]?.cursor, undefined);
+    assert.deepEqual(runtime.evidence(true), []);
+    assert.deepEqual(await runtime.preview("mock"), preview);
+    await assert.rejects(runtime.ingestOnce("mock"), /Source is disabled/);
+    runtime.close();
+
+    raw.sources[0]!.enabled = true;
+    writeFileSync(configPath, JSON.stringify(raw));
+    chmodSync(configPath, 0o600);
+    const enabledConfig = loadFabricConfig(configPath, [registration]);
+    const enabledRuntime = new FabricRuntime(enabledConfig, [registration]);
+    await enabledRuntime.ingestOnce("mock");
+    assert.equal((await enabledRuntime.sources())[0]?.cursor, "1");
+    assert.equal(enabledRuntime.evidence().length, 1);
+    enabledRuntime.close();
+  });
+});
+
+test("rejects connector parsers that widen common source policy", async () => {
+  await withConfig(async (configPath) => {
+    const raw = JSON.parse(readFileSync(configPath, "utf8")) as {
+      sources: Array<Record<string, unknown>>;
+    };
+    raw.sources[0]!.type = "fixture-plugin";
+    writeFileSync(configPath, JSON.stringify(raw));
+    chmodSync(configPath, 0o600);
+    const registration = defineConnectorRegistration({
+      type: "fixture-plugin",
+      parseConfig(value) {
+        return {
+          ...ConnectorSourceConfigSchema.parse(value),
+          containers: ["broader-container"],
+        };
+      },
+      create() {
+        throw new Error("must not construct a rejected connector");
+      },
+    });
+    assert.throws(
+      () => loadFabricConfig(configPath, [registration]),
+      /changed common source policy/,
+    );
+  });
+});
+
+test("rejects inline connector credentials without exposing their value", async () => {
+  await withConfig(async (configPath) => {
+    const raw = JSON.parse(readFileSync(configPath, "utf8")) as {
+      sources: Array<Record<string, unknown>>;
+    };
+    raw.sources[0]!.type = "fixture-plugin";
+    raw.sources[0]!["clientSecret"] = "sensitive-fixture-value";
+    writeFileSync(configPath, JSON.stringify(raw));
+    chmodSync(configPath, 0o600);
+    assert.throws(() => loadFabricConfig(configPath, [fixturePlugin()]), (error: unknown) => {
+      assert.match(String(error), /Inline credential field is not allowed: clientSecret/);
+      assert.doesNotMatch(String(error), /sensitive-fixture-value/);
+      return true;
+    });
   });
 });
 
@@ -233,6 +347,9 @@ test("does not advance a cursor when payload integrity validation fails", async 
     chmodSync(configPath, 0o600);
 
     const runtime = new FabricRuntime(loadFabricConfig(configPath));
+    await assert.rejects(runtime.preview("mock"), /Payload integrity check failed/);
+    assert.equal((await runtime.sources())[0]?.cursor, undefined);
+    assert.deepEqual(runtime.evidence(true), []);
     await assert.rejects(runtime.ingestOnce(), /Payload integrity check failed/);
     assert.equal((await runtime.sources())[0]?.cursor, undefined);
     assert.deepEqual(runtime.evidence(true), []);
@@ -322,6 +439,15 @@ test("exposes the synthetic operator workflow through the CLI", async () => {
     const sources = run("sources", "list") as Array<{ id: string; cursor?: string }>;
     assert.equal(sources[0]?.id, "mock");
     assert.equal(sources[0]?.cursor, undefined);
+    const preview = run("sources", "preview", "--source", "mock") as {
+      nextCursor?: string;
+      events: Array<{ operation: string }>;
+    };
+    assert.equal(preview.nextCursor, "1");
+    assert.equal(preview.events[0]?.operation, "create");
+    const afterPreview = run("sources", "list") as Array<{ cursor?: string }>;
+    assert.equal(afterPreview[0]?.cursor, undefined);
+    assert.deepEqual(run("evidence", "list"), []);
     run("ingest", "--once");
     const packet = run(
       "context",

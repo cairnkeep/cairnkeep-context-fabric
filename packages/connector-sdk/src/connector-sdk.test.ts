@@ -1,12 +1,18 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import type { EvidenceEvent } from "@cairnkeep/context-contracts";
 
 import {
+  ConnectorSourceConfigSchema,
   InMemoryCursorStore,
+  defineConnectorRegistration,
+  pullConnectorBatch,
   runConnectorOnce,
+  verifyConnectorPayloads,
   type ConnectorAdapter,
+  type EvidenceConnectorAdapter,
 } from "./index.js";
 
 function fixtureEvent(overrides: Partial<EvidenceEvent> = {}): EvidenceEvent {
@@ -121,4 +127,76 @@ test("rejects batches larger than the requested limit", async () => {
       limit: 1,
     }),
   );
+});
+
+test("pulls a validated batch without owning cursor persistence", async () => {
+  const connector: ConnectorAdapter = {
+    id: "mock",
+    async pull(request) {
+      assert.equal(request.cursor, "cursor-1");
+      return { events: [fixtureEvent()], nextCursor: "cursor-2", caughtUp: true };
+    },
+  };
+  const batch = await pullConnectorBatch({ connector, cursor: "cursor-1", limit: 1 });
+  assert.equal(batch.nextCursor, "cursor-2");
+  assert.equal(batch.events.length, 1);
+});
+
+test("verifies payload bytes and digest before preview or admission", async () => {
+  const payload = "reviewed source payload";
+  const event = fixtureEvent({
+    content: {
+      mimeType: "text/plain",
+      sha256: createHash("sha256").update(payload).digest("hex"),
+      payloadRef: "fixture://payload/message-001",
+      bytes: Buffer.byteLength(payload),
+    },
+  });
+  const connector: EvidenceConnectorAdapter = {
+    id: "mock",
+    async pull() {
+      return { events: [event], caughtUp: true };
+    },
+    async payload() {
+      return payload;
+    },
+  };
+  await verifyConnectorPayloads(connector, [event]);
+  await assert.rejects(
+    verifyConnectorPayloads({ ...connector, payload: async () => "tampered" }, [event]),
+    /Payload integrity check failed/,
+  );
+});
+
+test("defines registrations with validated common source configuration", () => {
+  const registration = defineConnectorRegistration({
+    type: "fixture-plugin",
+    parseConfig(value) {
+      return ConnectorSourceConfigSchema.parse(value);
+    },
+    create(config) {
+      return {
+        id: config.id,
+        async pull() {
+          return { events: [], caughtUp: true };
+        },
+        async payload() {
+          throw new Error("no payload");
+        },
+      };
+    },
+  });
+  const config = registration.parseConfig({
+    id: "fixture-source",
+    type: "fixture-plugin",
+    containers: ["project-alpha"],
+  }, { baseDir: "/fixture" });
+  assert.equal(config.enabled, false);
+  assert.equal(config.batchSize, 100);
+  assert.equal(registration.create(config).id, "fixture-source");
+  assert.throws(() => registration.parseConfig({
+    id: "fixture-source",
+    type: "other-plugin",
+    containers: ["project-alpha"],
+  }, { baseDir: "/fixture" }), /returned type other-plugin/);
 });

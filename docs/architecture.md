@@ -59,3 +59,7 @@ The public service supplies contracts and safe implementations. A deployment
 overlay selects connectors, credentials, source allowlists, retention,
 approved model endpoints, storage topology, and rollout policy. Installing the
 public packages does not enroll a machine or discover a remote service.
+
+Connector implementations are registered in code by a deployment-owned
+executable. Configuration never names a module to import, so editing a source
+file cannot turn data configuration into arbitrary code loading.

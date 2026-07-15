@@ -51,7 +51,7 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
-export function capabilities(serviceVersion = "0.3.0", storageEnabled = false): Capabilities {
+export function capabilities(serviceVersion = "0.4.0", storageEnabled = false): Capabilities {
   return {
     protocolVersion: CONTEXT_PROTOCOL_VERSION,
     serviceVersion,
@@ -76,7 +76,7 @@ export function createFabricServer(options: FabricServerOptions): Server {
   if (options.token.length < 16) {
     throw new Error("Fabric server token must contain at least 16 characters.");
   }
-  const serviceVersion = options.serviceVersion ?? "0.3.0";
+  const serviceVersion = options.serviceVersion ?? "0.4.0";
 
   return createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
