@@ -113,10 +113,12 @@ test("loads only explicitly registered connector types and previews without admi
     const runtime = new FabricRuntime(config, [registration]);
     const preview = await runtime.preview("mock");
     assert.equal(preview.type, "fixture-plugin");
-    assert.equal(preview.currentCursor, undefined);
-    assert.equal(preview.nextCursor, "1");
+    assert.equal(preview.currentCursorPresent, false);
+    assert.equal(preview.nextCursorPresent, true);
+    assert.equal("currentCursor" in preview, false);
+    assert.equal("nextCursor" in preview, false);
     assert.equal(preview.events[0]?.operation, "create");
-    assert.equal((await runtime.sources())[0]?.cursor, undefined);
+    assert.equal((await runtime.sources())[0]?.cursorPresent, false);
     assert.deepEqual(runtime.evidence(true), []);
     assert.deepEqual(await runtime.preview("mock"), preview);
     await assert.rejects(runtime.ingestOnce("mock"), /Source is disabled/);
@@ -128,7 +130,7 @@ test("loads only explicitly registered connector types and previews without admi
     const enabledConfig = loadFabricConfig(configPath, [registration]);
     const enabledRuntime = new FabricRuntime(enabledConfig, [registration]);
     await enabledRuntime.ingestOnce("mock");
-    assert.equal((await enabledRuntime.sources())[0]?.cursor, "1");
+    assert.equal((await enabledRuntime.sources())[0]?.cursorPresent, true);
     assert.equal(enabledRuntime.evidence().length, 1);
     enabledRuntime.close();
   });
@@ -188,6 +190,7 @@ test("persists cursors and fails closed across the complete evidence lifecycle",
       enabled: true,
       available: false,
       containers: ["project-alpha"],
+      cursorPresent: false,
     }]);
 
     const created = await runtime.ingestOnce();
@@ -197,7 +200,7 @@ test("persists cursors and fails closed across the complete evidence lifecycle",
     runtime.close();
 
     runtime = new FabricRuntime(config);
-    assert.equal((await runtime.sources())[0]?.cursor, "1");
+    assert.equal((await runtime.sources())[0]?.cursorPresent, true);
     await runtime.ingestOnce();
     assert.match(
       runtime.context(request()).sections[0]?.content ?? "",
@@ -211,7 +214,7 @@ test("persists cursors and fails closed across the complete evidence lifecycle",
     await runtime.ingestOnce();
     assert.equal(runtime.context(request(), "developer-a").sections.length, 0);
     assert.deepEqual(runtime.evidence(true).map((item) => [item.state, item.accessible]), [["deleted", false]]);
-    assert.equal((await runtime.sources())[0]?.cursor, "4");
+    assert.equal((await runtime.sources())[0]?.cursorPresent, true);
     runtime.close();
   });
 });
@@ -469,10 +472,10 @@ test("does not advance a cursor when payload integrity validation fails", async 
 
     const runtime = new FabricRuntime(loadFabricConfig(configPath));
     await assert.rejects(runtime.preview("mock"), /Payload integrity check failed/);
-    assert.equal((await runtime.sources())[0]?.cursor, undefined);
+    assert.equal((await runtime.sources())[0]?.cursorPresent, false);
     assert.deepEqual(runtime.evidence(true), []);
     await assert.rejects(runtime.ingestOnce(), /Payload integrity check failed/);
-    assert.equal((await runtime.sources())[0]?.cursor, undefined);
+    assert.equal((await runtime.sources())[0]?.cursorPresent, false);
     assert.deepEqual(runtime.evidence(true), []);
     runtime.close();
   });
@@ -558,17 +561,18 @@ test("exposes the synthetic operator workflow through the CLI", async () => {
       [cliPath, ...args, "--config", configPath],
       { encoding: "utf8" },
     ));
-    const sources = run("sources", "list") as Array<{ id: string; cursor?: string }>;
+    const sources = run("sources", "list") as Array<{ id: string; cursorPresent: boolean }>;
     assert.equal(sources[0]?.id, "mock");
-    assert.equal(sources[0]?.cursor, undefined);
+    assert.equal(sources[0]?.cursorPresent, false);
     const preview = run("sources", "preview", "--source", "mock") as {
-      nextCursor?: string;
+      nextCursorPresent: boolean;
       events: Array<{ operation: string }>;
     };
-    assert.equal(preview.nextCursor, "1");
+    assert.equal(preview.nextCursorPresent, true);
+    assert.equal("nextCursor" in preview, false);
     assert.equal(preview.events[0]?.operation, "create");
-    const afterPreview = run("sources", "list") as Array<{ cursor?: string }>;
-    assert.equal(afterPreview[0]?.cursor, undefined);
+    const afterPreview = run("sources", "list") as Array<{ cursorPresent: boolean }>;
+    assert.equal(afterPreview[0]?.cursorPresent, false);
     assert.deepEqual(run("evidence", "list"), []);
     run("ingest", "--once");
     const packet = run(

@@ -37,7 +37,7 @@ export type SourceStatus = {
   enabled: boolean;
   available: boolean;
   containers: string[];
-  cursor?: string;
+  cursorPresent: boolean;
   checkedAt?: string;
   healthExpiresAt?: string;
 };
@@ -46,8 +46,8 @@ export type SourcePreview = {
   sourceId: string;
   type: string;
   caughtUp: boolean;
-  currentCursor?: string;
-  nextCursor?: string;
+  currentCursorPresent: boolean;
+  nextCursorPresent: boolean;
   events: Array<{
     eventId: string;
     operation: string;
@@ -113,13 +113,14 @@ export class FabricRuntime {
         enabled: source.config.enabled,
         available: false,
         containers: [...source.config.containers],
+        cursorPresent: false,
       };
       const health = this.#ledger.connectorAvailability(source.config.id);
       status.available = health.available;
       if (health.checkedAt !== undefined) status.checkedAt = health.checkedAt;
       if (health.expiresAt !== undefined) status.healthExpiresAt = health.expiresAt;
       const cursor = await this.#ledger.get(source.config.id);
-      if (cursor !== undefined) status.cursor = cursor;
+      status.cursorPresent = cursor !== undefined;
       statuses.push(status);
     }
     return statuses.sort((left, right) => left.id.localeCompare(right.id));
@@ -172,6 +173,8 @@ export class FabricRuntime {
       sourceId: source.config.id,
       type: source.config.type,
       caughtUp: batch.caughtUp,
+      currentCursorPresent: currentCursor !== undefined,
+      nextCursorPresent: batch.nextCursor !== undefined,
       events: batch.events.map((event) => ({
         eventId: event.eventId,
         operation: event.operation,
@@ -182,8 +185,6 @@ export class FabricRuntime {
         ...(event.content === undefined ? {} : { bytes: event.content.bytes }),
       })),
     };
-    if (currentCursor !== undefined) preview.currentCursor = currentCursor;
-    if (batch.nextCursor !== undefined) preview.nextCursor = batch.nextCursor;
     return preview;
   }
 
