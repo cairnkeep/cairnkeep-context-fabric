@@ -11,11 +11,13 @@ harness sessions.
 Pre-alpha synthetic vertical slice. The repository defines protocol contracts,
 an authenticated client, a connector SDK, a mode-0600 deployment configuration,
 a durable SQLite evidence ledger, incremental synthetic ingestion, lifecycle-
-aware authorization, cited context retrieval, and a loopback-first service.
+aware authorization, cited context retrieval, a durable human-review candidate
+queue, and a loopback-first service.
 
 It does not include live connectors, schedulers, model calls, compiled knowledge,
-autonomous memory promotion, or deployment credentials. Synthetic fixtures are
-still the only accepted source type.
+automatic candidate extraction, candidate editing, memory promotion, or
+deployment credentials. Synthetic fixtures are still the only accepted source
+type.
 
 ## Knowledge layers
 
@@ -64,6 +66,8 @@ Run the incremental synthetic lifecycle walkthrough in
 [docs/synthetic-testing.md](docs/synthetic-testing.md). Source configuration and
 the boundary between public schemas and private selections are documented in
 [docs/source-configuration.md](docs/source-configuration.md).
+Candidate review and its deliberately disconnected promotion boundary are
+documented in [docs/candidate-review.md](docs/candidate-review.md).
 
 The workspace is private while the protocol is pre-alpha. Individual packages
 will become publishable only after the vertical spike freezes their first

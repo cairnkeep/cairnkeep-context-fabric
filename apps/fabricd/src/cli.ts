@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 import { resolve } from "node:path";
 
+import { CandidateStateSchema } from "@cairnkeep/context-contracts";
+
 import { loadFabricConfig } from "./config.js";
+import type { CandidateReviewAction } from "./ledger.js";
 import { FabricRuntime } from "./runtime.js";
 
 function option(args: string[], name: string, fallback?: string): string | undefined {
@@ -54,8 +57,44 @@ async function main(): Promise<void> {
       process.stdout.write(`${JSON.stringify(packet, null, 2)}\n`);
       return;
     }
+    if (group === "candidates" && action === "propose") {
+      const evidenceIds = required(option(args, "--evidence"), "--evidence")
+        .split(",")
+        .map((value) => value.trim())
+        .filter((value) => value.length > 0);
+      const candidate = runtime.proposeCandidate({
+        proposedScope: required(option(args, "--scope"), "--scope"),
+        proposedKey: required(option(args, "--key"), "--key"),
+        proposedValue: required(option(args, "--value"), "--value"),
+        evidenceIds,
+        confidence: Number.parseFloat(option(args, "--confidence", "0.5") ?? "0.5"),
+        rationale: required(option(args, "--rationale"), "--rationale"),
+      });
+      process.stdout.write(`${JSON.stringify(candidate, null, 2)}\n`);
+      return;
+    }
+    if (group === "candidates" && action === "list") {
+      const rawStates = option(args, "--state");
+      const states = rawStates === undefined
+        ? undefined
+        : rawStates.split(",").map((state) => CandidateStateSchema.parse(state.trim()));
+      process.stdout.write(`${JSON.stringify(runtime.candidates(states), null, 2)}\n`);
+      return;
+    }
+    if (group === "candidates" && action === "review") {
+      const reviewAction = required(option(args, "--action"), "--action");
+      if (!["approve", "reject", "snooze"].includes(reviewAction)) {
+        throw new Error("--action must be approve, reject, or snooze.");
+      }
+      const candidate = runtime.reviewCandidate(
+        required(option(args, "--id"), "--id"),
+        reviewAction as CandidateReviewAction,
+      );
+      process.stdout.write(`${JSON.stringify(candidate, null, 2)}\n`);
+      return;
+    }
     throw new Error(
-      "Usage: cairn-fabric sources list|ingest --once|evidence list|context get --config FILE [options]",
+      "Usage: cairn-fabric sources list|ingest --once|evidence list|context get|candidates propose|list|review --config FILE [options]",
     );
   } finally {
     runtime.close();

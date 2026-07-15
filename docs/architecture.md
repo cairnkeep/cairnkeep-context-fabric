@@ -43,7 +43,8 @@ semantic edits become contested rather than being silently overwritten.
 
 ### Candidate review
 
-Extraction creates candidates. Review can approve, edit, reject, or snooze.
+The current vertical slice accepts deliberate manual proposals. Review can
+approve, reject, or snooze them; extraction and editing remain future work.
 Free-form communication is never automatically promoted to durable memory.
 
 ### Context packets

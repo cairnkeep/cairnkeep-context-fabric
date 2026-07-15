@@ -4,11 +4,15 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import {
+  CandidateStateSchema,
   EvidenceEventSchema,
+  MemoryCandidateSchema,
+  type CandidateState,
   type Citation,
   type ContextPacket,
   type ContextRequest,
   type EvidenceEvent,
+  type MemoryCandidate,
 } from "@cairnkeep/context-contracts";
 import type { CursorStore } from "@cairnkeep/connector-sdk";
 
@@ -42,6 +46,22 @@ export type EvidenceSummary = {
 };
 
 export type PayloadResolver = (payloadRef: string) => Promise<string>;
+
+export type CandidateProposal = Pick<
+  MemoryCandidate,
+  "proposedScope" | "proposedKey" | "proposedValue" | "evidenceIds" | "confidence" | "rationale"
+> & {
+  policyRule?: string;
+};
+
+export type CandidateReviewAction = "approve" | "reject" | "snooze";
+
+type CandidateRow = {
+  candidate_id: string;
+  principal_id: string;
+  state: CandidateState;
+  candidate_json: string;
+};
 
 function evidenceId(event: EvidenceEvent): string {
   const identity = [
@@ -114,6 +134,23 @@ export class FabricLedger implements CursorStore {
         metadata_json TEXT NOT NULL,
         UNIQUE (deployment_id, connector, container, item)
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS memory_candidates (
+        candidate_id TEXT PRIMARY KEY,
+        principal_id TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('pending', 'approved', 'rejected', 'snoozed', 'invalid')),
+        candidate_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS candidate_evidence (
+        candidate_id TEXT NOT NULL REFERENCES memory_candidates(candidate_id) ON DELETE CASCADE,
+        evidence_id TEXT NOT NULL REFERENCES evidence_current(evidence_id),
+        PRIMARY KEY (candidate_id, evidence_id)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS memory_candidates_principal_state
+        ON memory_candidates (principal_id, state, created_at);
+      CREATE INDEX IF NOT EXISTS candidate_evidence_evidence
+        ON candidate_evidence (evidence_id, candidate_id);
     `);
   }
 
@@ -252,6 +289,183 @@ export class FabricLedger implements CursorStore {
     this.#database.prepare(
       "INSERT INTO evidence_events (event_id, delivery_id, event_json) VALUES (?, ?, ?)",
     ).run(event.eventId, event.deliveryId, serialized);
+    if (event.operation !== "create") this.#reconcileCandidatesForEvidence(id, new Date());
+  }
+
+  proposeCandidate(
+    proposal: CandidateProposal,
+    principalId: string,
+    now = new Date(),
+  ): MemoryCandidate {
+    const ids = [...new Set(proposal.evidenceIds)];
+    if (ids.length !== proposal.evidenceIds.length) {
+      throw new Error("Candidate evidence ids must be unique.");
+    }
+    const rows = ids.map((id) => this.#database.prepare(
+      "SELECT * FROM evidence_current WHERE evidence_id = ?",
+    ).get(id) as CurrentRow | undefined);
+    if (rows.some((row) => row === undefined)) {
+      throw new Error("Candidate evidence must exist in the current ledger.");
+    }
+    const evidence = rows as CurrentRow[];
+    if (evidence.some((row) => !authorized(row, principalId, now) || row.payload === null)) {
+      throw new Error("Candidate evidence must be active, unexpired, and accessible.");
+    }
+    const deployments = new Set(evidence.map((row) => row.deployment_id));
+    if (deployments.size !== 1) throw new Error("Candidate evidence must share one deployment.");
+    const expiries = evidence
+      .flatMap((row) => row.expires_at === null ? [] : [row.expires_at])
+      .sort((left, right) => Date.parse(left) - Date.parse(right));
+    const candidate = MemoryCandidateSchema.parse({
+      schemaVersion: 1,
+      candidateId: `candidate-${randomUUID()}`,
+      deploymentId: evidence[0]!.deployment_id,
+      proposedScope: proposal.proposedScope,
+      proposedKey: proposal.proposedKey,
+      proposedValue: proposal.proposedValue,
+      evidenceIds: ids,
+      claimIds: [],
+      confidence: proposal.confidence,
+      rationale: proposal.rationale,
+      policyRule: proposal.policyRule ?? "human-review-required",
+      state: "pending",
+      createdAt: now.toISOString(),
+      ...(expiries[0] === undefined ? {} : { expiresAt: expiries[0] }),
+    });
+
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      this.#database.prepare(`
+        INSERT INTO memory_candidates (
+          candidate_id, principal_id, state, candidate_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `).run(
+        candidate.candidateId,
+        principalId,
+        candidate.state,
+        JSON.stringify(candidate),
+        candidate.createdAt,
+        candidate.createdAt,
+      );
+      const attach = this.#database.prepare(
+        "INSERT INTO candidate_evidence (candidate_id, evidence_id) VALUES (?, ?)",
+      );
+      for (const id of ids) attach.run(candidate.candidateId, id);
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
+    }
+    return candidate;
+  }
+
+  listCandidates(
+    principalId: string,
+    states?: readonly CandidateState[],
+    now = new Date(),
+  ): MemoryCandidate[] {
+    this.#refreshCandidateValidity(principalId, now);
+    const rows = this.#database.prepare(`
+      SELECT candidate_id, principal_id, state, candidate_json
+      FROM memory_candidates
+      WHERE principal_id = ?
+      ORDER BY created_at DESC, candidate_id ASC
+    `).all(principalId) as unknown as CandidateRow[];
+    const stateFilter = states === undefined
+      ? undefined
+      : new Set(states.map((state) => CandidateStateSchema.parse(state)));
+    return rows
+      .filter((row) => stateFilter === undefined || stateFilter.has(row.state))
+      .map((row) => MemoryCandidateSchema.parse(JSON.parse(row.candidate_json)));
+  }
+
+  reviewCandidate(
+    candidateId: string,
+    action: CandidateReviewAction,
+    principalId: string,
+    now = new Date(),
+  ): MemoryCandidate {
+    this.#refreshCandidateValidity(principalId, now);
+    const row = this.#database.prepare(`
+      SELECT candidate_id, principal_id, state, candidate_json
+      FROM memory_candidates WHERE candidate_id = ? AND principal_id = ?
+    `).get(candidateId, principalId) as CandidateRow | undefined;
+    if (row === undefined) throw new Error(`Unknown candidate: ${candidateId}.`);
+    if (row.state === "invalid") throw new Error(`Candidate is invalid: ${candidateId}.`);
+    if (row.state === "approved" || row.state === "rejected") {
+      throw new Error(`Candidate review is already final: ${candidateId}.`);
+    }
+    const state = CandidateStateSchema.parse({
+      approve: "approved",
+      reject: "rejected",
+      snooze: "snoozed",
+    }[action]);
+    return this.#setCandidateState(row, state, now.toISOString());
+  }
+
+  #refreshCandidateValidity(principalId: string, now: Date): void {
+    const rows = this.#database.prepare(`
+      SELECT DISTINCT candidate_id
+      FROM memory_candidates
+      WHERE principal_id = ?
+    `).all(principalId) as unknown as Array<{ candidate_id: string }>;
+    for (const { candidate_id: candidateId } of rows) {
+      const evidence = this.#database.prepare(`
+        SELECT evidence_current.*
+        FROM candidate_evidence
+        JOIN evidence_current USING (evidence_id)
+        WHERE candidate_id = ?
+      `).all(candidateId) as unknown as CurrentRow[];
+      if (evidence.length === 0 || evidence.some((row) => !authorized(row, principalId, now))) {
+        this.#deleteCandidate(candidateId);
+      }
+    }
+  }
+
+  #reconcileCandidatesForEvidence(id: string, now: Date): void {
+    const evidence = this.#database.prepare(
+      "SELECT * FROM evidence_current WHERE evidence_id = ?",
+    ).get(id) as CurrentRow | undefined;
+    const rows = this.#database.prepare(`
+      SELECT memory_candidates.candidate_id, memory_candidates.principal_id,
+        memory_candidates.state, memory_candidates.candidate_json
+      FROM memory_candidates
+      JOIN candidate_evidence USING (candidate_id)
+      WHERE candidate_evidence.evidence_id = ?
+    `).all(id) as unknown as CandidateRow[];
+    for (const row of rows) {
+      if (evidence === undefined || !authorized(evidence, row.principal_id, now)) {
+        this.#deleteCandidate(row.candidate_id);
+      } else if (["pending", "snoozed", "approved"].includes(row.state)) {
+        this.#invalidateCandidate(row.candidate_id, now.toISOString());
+      }
+    }
+  }
+
+  #invalidateCandidate(candidateId: string, updatedAt: string): void {
+    const row = this.#database.prepare(`
+      SELECT candidate_id, principal_id, state, candidate_json
+      FROM memory_candidates WHERE candidate_id = ?
+    `).get(candidateId) as CandidateRow | undefined;
+    if (row === undefined || row.state === "invalid" || row.state === "rejected") return;
+    this.#setCandidateState(row, "invalid", updatedAt);
+  }
+
+  #setCandidateState(row: CandidateRow, state: CandidateState, updatedAt: string): MemoryCandidate {
+    const candidate = MemoryCandidateSchema.parse({
+      ...MemoryCandidateSchema.parse(JSON.parse(row.candidate_json)),
+      state,
+    });
+    this.#database.prepare(`
+      UPDATE memory_candidates
+      SET state = ?, candidate_json = ?, updated_at = ?
+      WHERE candidate_id = ?
+    `).run(state, JSON.stringify(candidate), updatedAt, row.candidate_id);
+    return candidate;
+  }
+
+  #deleteCandidate(candidateId: string): void {
+    this.#database.prepare("DELETE FROM memory_candidates WHERE candidate_id = ?").run(candidateId);
   }
 
   context(request: ContextRequest, principalId: string, now = new Date()): ContextPacket {
