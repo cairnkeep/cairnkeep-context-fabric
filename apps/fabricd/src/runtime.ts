@@ -59,6 +59,13 @@ export type SourcePreview = {
   }>;
 };
 
+export type SourceIngestResult = {
+  sourceId: string;
+  eventCount: number;
+  caughtUp: boolean;
+  cursorAdvanced: boolean;
+};
+
 function syntheticSource(source: FabricSourceConfig): source is SyntheticSourceConfig {
   return source.type === "synthetic" && "fixturePath" in source;
 }
@@ -126,11 +133,11 @@ export class FabricRuntime {
     return statuses.sort((left, right) => left.id.localeCompare(right.id));
   }
 
-  async ingestOnce(sourceId?: string): Promise<Array<{ sourceId: string; batch: ConnectorBatch }>> {
+  async ingestOnce(sourceId?: string): Promise<SourceIngestResult[]> {
     const selected = sourceId === undefined
       ? [...this.#sources.values()].filter((source) => source.config.enabled)
       : [this.#source(sourceId)];
-    const results: Array<{ sourceId: string; batch: ConnectorBatch }> = [];
+    const results: SourceIngestResult[] = [];
     for (const source of selected) {
       if (!source.config.enabled) throw new Error(`Source is disabled: ${source.config.id}`);
       const allowed = new Set(source.config.containers);
@@ -150,7 +157,12 @@ export class FabricRuntime {
           new Date(),
           source.config.healthTtlSeconds,
         );
-        results.push({ sourceId: source.config.id, batch });
+        results.push({
+          sourceId: source.config.id,
+          eventCount: batch.events.length,
+          caughtUp: batch.caughtUp,
+          cursorAdvanced: batch.nextCursor !== undefined,
+        });
       } catch (error) {
         this.#ledger.setConnectorAvailability(source.config.id, false);
         throw error;

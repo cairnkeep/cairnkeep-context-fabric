@@ -194,7 +194,12 @@ test("persists cursors and fails closed across the complete evidence lifecycle",
     }]);
 
     const created = await runtime.ingestOnce();
-    assert.equal(created[0]?.batch.events[0]?.operation, "create");
+    assert.deepEqual(created, [{
+      sourceId: "mock",
+      eventCount: 1,
+      caughtUp: false,
+      cursorAdvanced: true,
+    }]);
     assert.match(runtime.context(request()).sections[0]?.content ?? "", /Use the stable adapter interface/);
     assert.equal(runtime.context(request(), "developer-b").sections.length, 1);
     runtime.close();
