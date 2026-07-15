@@ -16,7 +16,8 @@
     "build": "tsc -b --pretty false",
     "build:tests": "tsc -p packages/contracts/tsconfig.test.json --pretty false && tsc -p packages/client/tsconfig.test.json --pretty false && tsc -p packages/connector-sdk/tsconfig.test.json --pretty false && tsc -p apps/fabricd/tsconfig.test.json --pretty false",
     "clean": "node scripts/clean.mjs",
-    "test": "npm run build && npm run build:tests && node --test packages/contracts/test-dist/contracts.test.js packages/client/test-dist/client.test.js packages/connector-sdk/test-dist/connector-sdk.test.js apps/fabricd/test-dist/server.test.js",
+    "test": "npm run build && npm run build:tests && node --test packages/contracts/test-dist/contracts.test.js packages/client/test-dist/client.test.js packages/connector-sdk/test-dist/connector-sdk.test.js apps/fabricd/test-dist/server.test.js apps/fabricd/test-dist/runtime.test.js",
+    "fabric": "node apps/fabricd/dist/cli.js",
     "check:public": "node scripts/verify-public.mjs",
     "check:packages": "node scripts/verify-packages.mjs",
     "check": "npm run check:public && npm run clean && npm run build && npm test && npm run check:packages && npm audit --omit=dev --audit-level=high"
