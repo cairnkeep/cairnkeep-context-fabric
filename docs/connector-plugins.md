@@ -50,7 +50,8 @@ validation, payload, admission, or cursor failure marks it unavailable and
 immediately withholds its evidence and evidence-backed candidates. A later
 successful attempt restores visibility without destroying candidates during a
 transient outage. The default lease is 15 minutes and expires fail-closed if no
-successful run renews it. Preview never changes availability.
+successful run renews it. Preview never marks a source available or renews its
+lease; loading a disabled source keeps that source unavailable by policy.
 
 Inline credential fields are rejected before connector-specific parsing. A
 configuration may contain an environment-variable name or secret-store
