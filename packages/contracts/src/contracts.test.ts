@@ -3,11 +3,14 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  CandidatePatchSchema,
   CandidateExtractionRequestSchema,
   CandidateExtractionResultSchema,
   ContextRequestSchema,
   EvidenceEventSchema,
   MemoryCandidateSchema,
+  MemoryInvalidationRequestSchema,
+  MemoryPromotionRequestSchema,
 } from "./index.js";
 
 const baseEvent = {
@@ -104,6 +107,36 @@ test("candidate extraction contracts are bounded and strict", () => {
       state: "approved",
     }],
   }).success, false);
+});
+
+test("candidate patches are partial, strict, and non-empty", () => {
+  assert.equal(CandidatePatchSchema.safeParse({ proposedValue: "Edited after review." }).success, true);
+  assert.equal(CandidatePatchSchema.safeParse({}).success, false);
+  assert.equal(CandidatePatchSchema.safeParse({ state: "approved" }).success, false);
+});
+
+test("promotion contracts carry stable project routing and lifecycle reasons", () => {
+  const promotion = MemoryPromotionRequestSchema.parse({
+    schemaVersion: 1,
+    promotionId: "candidate-001",
+    deploymentId: "fixture",
+    principalId: "developer-a",
+    scope: "project",
+    projectId: "project-alpha",
+    key: "decisions/example",
+    value: "Use the reviewed interface.",
+  });
+  assert.equal(promotion.projectId, "project-alpha");
+  assert.equal(MemoryInvalidationRequestSchema.safeParse({
+    ...promotion,
+    value: undefined,
+    reason: "access-revoked",
+  }).success, false);
+  const { value: _value, ...withoutValue } = promotion;
+  assert.equal(MemoryInvalidationRequestSchema.safeParse({
+    ...withoutValue,
+    reason: "access-revoked",
+  }).success, true);
 });
 
 test("synthetic lifecycle fixtures conform to the evidence contract", () => {

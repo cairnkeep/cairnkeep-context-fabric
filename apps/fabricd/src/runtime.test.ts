@@ -19,6 +19,7 @@ import {
 import { loadFabricConfig } from "./config.js";
 import type { CandidateExtractor } from "./extractor.js";
 import { FabricLedger } from "./ledger.js";
+import type { MemoryPromotionAdapter } from "./promotion.js";
 import { FabricRuntime } from "./runtime.js";
 import { createFabricServer } from "./server.js";
 import { SyntheticConnector } from "./synthetic-connector.js";
@@ -110,8 +111,16 @@ test("loads only explicitly registered connector types and previews without admi
 
     assert.throws(() => loadFabricConfig(configPath), /Unknown source type: fixture-plugin/);
     const registration = fixturePlugin();
+    const invalidations: string[] = [];
+    const promotionAdapter: MemoryPromotionAdapter = {
+      id: "fixture-memory",
+      async apply() {},
+      async invalidate(request) {
+        invalidations.push(request.reason);
+      },
+    };
     const config = loadFabricConfig(configPath, [registration]);
-    const runtime = new FabricRuntime(config, [registration]);
+    const runtime = new FabricRuntime(config, [registration], undefined, promotionAdapter);
     const preview = await runtime.preview("mock");
     assert.equal(preview.type, "fixture-plugin");
     assert.equal(preview.currentCursorPresent, false);
@@ -268,8 +277,16 @@ test("withholds evidence and candidates while a connector is unavailable", async
         };
       },
     });
+    const invalidations: string[] = [];
+    const promotionAdapter: MemoryPromotionAdapter = {
+      id: "fixture-memory",
+      async apply() {},
+      async invalidate(request) {
+        invalidations.push(request.reason);
+      },
+    };
     const config = loadFabricConfig(configPath, [registration]);
-    const runtime = new FabricRuntime(config, [registration]);
+    const runtime = new FabricRuntime(config, [registration], undefined, promotionAdapter);
 
     await runtime.ingestOnce();
     assert.equal((await runtime.sources())[0]?.available, true);
@@ -283,6 +300,7 @@ test("withholds evidence and candidates while a connector is unavailable", async
       rationale: "The source records the current project decision.",
     });
     runtime.reviewCandidate(candidate.candidateId, "approve");
+    assert.equal((await runtime.promoteCandidate(candidate.candidateId)).state, "active");
 
     control.fail = true;
     await assert.rejects(runtime.ingestOnce(), /source authentication unavailable/);
@@ -298,6 +316,10 @@ test("withholds evidence and candidates while a connector is unavailable", async
       () => runtime.reviewCandidate(candidate.candidateId, "approve"),
       /Candidate source is unavailable/,
     );
+    assert.equal(runtime.promotions()[0]?.state, "invalidation-pending");
+    await runtime.reconcilePromotions();
+    assert.deepEqual(invalidations, ["evidence-unavailable"]);
+    assert.equal(runtime.promotions()[0]?.state, "invalidated");
 
     control.fail = false;
     await runtime.ingestOnce();
@@ -373,6 +395,156 @@ test("keeps candidates in human review and invalidates them when evidence change
       () => runtime.reviewCandidate(candidate.candidateId, "approve"),
       /Candidate is invalid/,
     );
+    runtime.close();
+  });
+});
+
+test("edits only pending or snoozed candidates and returns them to pending review", async () => {
+  await withConfig(async (configPath) => {
+    const runtime = new FabricRuntime(loadFabricConfig(configPath));
+    await runtime.ingestOnce();
+    const candidate = runtime.proposeCandidate({
+      proposedScope: "project",
+      proposedKey: "decisions/adapter-interface",
+      proposedValue: "Use the draft adapter interface.",
+      evidenceIds: [runtime.evidence()[0]!.evidenceId],
+      confidence: 0.6,
+      rationale: "The source records the project decision.",
+    });
+    runtime.reviewCandidate(candidate.candidateId, "snooze");
+    const edited = runtime.editCandidate(candidate.candidateId, {
+      proposedValue: "Use the reviewed adapter interface.",
+      confidence: 0.9,
+      rationale: "The source explicitly records the reviewed decision.",
+    });
+    assert.equal(edited.state, "pending");
+    assert.equal(edited.proposedValue, "Use the reviewed adapter interface.");
+    runtime.reviewCandidate(candidate.candidateId, "approve");
+    assert.throws(
+      () => runtime.editCandidate(candidate.candidateId, { proposedValue: "Change after approval." }),
+      /Only pending or snoozed candidates can be edited/,
+    );
+    runtime.close();
+  });
+});
+
+test("promotes only after approval and retracts memory when evidence changes", async () => {
+  await withConfig(async (configPath) => {
+    const applied: string[] = [];
+    const appliedProjectIds: Array<string | undefined> = [];
+    const invalidated: string[] = [];
+    const adapter: MemoryPromotionAdapter = {
+      id: "fixture-memory",
+      async apply(promotion) {
+        applied.push(`${promotion.promotionId}:${promotion.value}`);
+        appliedProjectIds.push(promotion.projectId);
+      },
+      async invalidate(promotion) {
+        invalidated.push(`${promotion.promotionId}:${promotion.reason}`);
+      },
+    };
+    const runtime = new FabricRuntime(loadFabricConfig(configPath), [], undefined, adapter);
+    await runtime.ingestOnce();
+    const candidate = runtime.proposeCandidate({
+      proposedScope: "project",
+      proposedKey: "decisions/adapter-interface",
+      proposedValue: "Use the reviewed adapter interface.",
+      evidenceIds: [runtime.evidence()[0]!.evidenceId],
+      confidence: 0.9,
+      rationale: "The source records the reviewed decision.",
+    });
+    await assert.rejects(runtime.promoteCandidate(candidate.candidateId), /must be approved/);
+    assert.deepEqual(applied, []);
+
+    runtime.reviewCandidate(candidate.candidateId, "approve");
+    assert.equal((await runtime.promoteCandidate(candidate.candidateId)).state, "active");
+    assert.equal(applied.length, 1);
+    assert.deepEqual(appliedProjectIds, ["project-alpha"]);
+    assert.equal((await runtime.promoteCandidate(candidate.candidateId)).state, "active");
+    assert.equal(applied.length, 1);
+
+    await runtime.ingestOnce();
+    assert.equal(runtime.candidates()[0]?.state, "invalid");
+    assert.equal(runtime.promotions()[0]?.state, "invalidation-pending");
+    const reconciliation = await runtime.reconcilePromotions();
+    assert.equal(reconciliation.failed, 0);
+    assert.equal(reconciliation.processed, 1);
+    assert.equal(runtime.promotions()[0]?.state, "invalidated");
+    assert.deepEqual(invalidated, [`${candidate.candidateId}:evidence-changed`]);
+    runtime.close();
+  });
+});
+
+test("retains failed promotion tasks for retry without duplicating the memory revision", async () => {
+  await withConfig(async (configPath) => {
+    let fail = true;
+    let applications = 0;
+    const adapter: MemoryPromotionAdapter = {
+      id: "fixture-memory",
+      async apply() {
+        applications += 1;
+        if (fail) throw new Error("fixture adapter unavailable");
+      },
+      async invalidate() {},
+    };
+    const runtime = new FabricRuntime(loadFabricConfig(configPath), [], undefined, adapter);
+    await runtime.ingestOnce();
+    const candidate = runtime.proposeCandidate({
+      proposedScope: "project",
+      proposedKey: "decisions/retry",
+      proposedValue: "Retry through the durable outbox.",
+      evidenceIds: [runtime.evidence()[0]!.evidenceId],
+      confidence: 0.9,
+      rationale: "The source records this decision.",
+    });
+    runtime.reviewCandidate(candidate.candidateId, "approve");
+    await assert.rejects(runtime.promoteCandidate(candidate.candidateId), /inspect deployment-local diagnostics/);
+    assert.equal(runtime.promotions()[0]?.state, "queued");
+    assert.equal(runtime.promotions()[0]?.attempts, 1);
+
+    fail = false;
+    assert.equal((await runtime.reconcilePromotions()).failed, 0);
+    assert.equal(runtime.promotions()[0]?.state, "active");
+    assert.equal(applications, 2);
+    assert.equal((await runtime.reconcilePromotions()).processed, 0);
+    assert.equal(applications, 2);
+    runtime.close();
+  });
+});
+
+test("retracts an apply that finishes after lifecycle invalidation", async () => {
+  await withConfig(async (configPath) => {
+    let runtime: FabricRuntime;
+    const operations: string[] = [];
+    const adapter: MemoryPromotionAdapter = {
+      id: "fixture-memory",
+      async apply() {
+        operations.push("apply-started");
+        await runtime.ingestOnce();
+        operations.push("apply-finished");
+      },
+      async invalidate() {
+        operations.push("invalidate");
+      },
+    };
+    runtime = new FabricRuntime(loadFabricConfig(configPath), [], undefined, adapter);
+    await runtime.ingestOnce();
+    const candidate = runtime.proposeCandidate({
+      proposedScope: "project",
+      proposedKey: "decisions/race",
+      proposedValue: "Do not survive lifecycle invalidation.",
+      evidenceIds: [runtime.evidence()[0]!.evidenceId],
+      confidence: 0.9,
+      rationale: "The source records this decision.",
+    });
+    runtime.reviewCandidate(candidate.candidateId, "approve");
+
+    await assert.rejects(runtime.promoteCandidate(candidate.candidateId), /did not complete/);
+    assert.equal(runtime.promotions()[0]?.state, "invalidation-pending");
+    assert.deepEqual(operations, ["apply-started", "apply-finished"]);
+    assert.equal((await runtime.reconcilePromotions()).processed, 1);
+    assert.equal(runtime.promotions()[0]?.state, "invalidated");
+    assert.deepEqual(operations, ["apply-started", "apply-finished", "invalidate"]);
     runtime.close();
   });
 });
@@ -681,6 +853,16 @@ test("exposes the synthetic operator workflow through the CLI", async () => {
     assert.equal(candidate.state, "pending");
     const candidates = run("candidates", "list", "--state", "pending") as Array<{ state: string }>;
     assert.equal(candidates[0]?.state, "pending");
+    const edited = run(
+      "candidates",
+      "edit",
+      "--id",
+      candidate.candidateId,
+      "--value",
+      "Use the reviewed stable adapter interface.",
+    ) as { state: string; proposedValue: string };
+    assert.equal(edited.state, "pending");
+    assert.equal(edited.proposedValue, "Use the reviewed stable adapter interface.");
     const reviewed = run(
       "candidates",
       "review",

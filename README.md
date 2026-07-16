@@ -11,15 +11,15 @@ harness sessions.
 Pre-alpha synthetic vertical slice. The repository defines protocol contracts,
 an authenticated client, a connector SDK, a mode-0600 deployment configuration,
 a durable SQLite evidence ledger, incremental synthetic ingestion, lifecycle-
-aware authorization, cited context retrieval, a durable human-review candidate
-queue, an explicitly registered connector plug-in boundary, a provider-neutral
-candidate extractor boundary, non-admitting source preview, and a loopback-first
-service.
+aware authorization, cited context retrieval, an editable durable human-review
+candidate queue, explicitly registered connector/extractor/promotion boundaries,
+a replay-safe promotion outbox with lifecycle invalidation, non-admitting source
+preview, and a loopback-first service.
 
 It does not include bundled live connectors, schedulers, model clients, compiled
-knowledge, scheduled candidate extraction, candidate editing, memory promotion, or
-deployment credentials. Synthetic fixtures are still the only accepted source
-type.
+knowledge, scheduled candidate extraction, a web review interface, a memory
+adapter, or deployment credentials. Synthetic fixtures are still the only
+accepted source type.
 
 ## Knowledge layers
 
@@ -44,6 +44,8 @@ Raw evidence never writes directly to durable memory.
 - Synthetic fixtures are the only accepted data during the initial spike.
 - Extractors are deployment-owned, explicit, and unable to approve or promote
   their output.
+- Approval never writes memory; promotion is a second explicit operator action.
+- Promotion adapters are deployment-owned, idempotent, and lifecycle-aware.
 
 ## Repository structure
 
@@ -70,14 +72,13 @@ Run the incremental synthetic lifecycle walkthrough in
 [docs/synthetic-testing.md](docs/synthetic-testing.md). Source configuration and
 the boundary between public schemas and private selections are documented in
 [docs/source-configuration.md](docs/source-configuration.md).
-Candidate review and its deliberately disconnected promotion boundary are
+Candidate review, editing, and the explicit promotion boundary are
 documented in [docs/candidate-review.md](docs/candidate-review.md).
 Deployment-owned connector registration and preview gates are documented in
 [docs/connector-plugins.md](docs/connector-plugins.md).
 
-The workspace is private while the protocol is pre-alpha. Individual packages
-will become publishable only after the vertical spike freezes their first
-supported contract.
+Individual packages will become publishable only after the vertical spike
+freezes their first supported contract.
 
 ## Relationship to Cairnkeep
 

@@ -43,9 +43,12 @@ semantic edits become contested rather than being silently overwritten.
 
 ### Candidate review
 
-The current vertical slice accepts deliberate manual proposals. Review can
-approve, reject, or snooze them; extraction and editing remain future work.
-Free-form communication is never automatically promoted to durable memory.
+The current vertical slice accepts deliberate manual or deployment-extracted
+proposals. Review can edit, approve, reject, or snooze them. Approval and
+promotion are separate actions; a durable outbox invokes an explicitly
+registered deployment adapter and retracts promoted memory when its evidence
+becomes inadmissible. Free-form communication is never automatically promoted
+to durable memory.
 
 ### Context packets
 

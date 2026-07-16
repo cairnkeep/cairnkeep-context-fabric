@@ -7,6 +7,8 @@ import {
   CandidateStateSchema,
   EvidenceEventSchema,
   MemoryCandidateSchema,
+  CandidatePatchSchema,
+  type CandidatePatch,
   type CandidateState,
   type Citation,
   type ContextPacket,
@@ -57,12 +59,49 @@ export type PayloadResolver = (payloadRef: string) => Promise<string>;
 
 export type CandidateProposal = Pick<
   MemoryCandidate,
-  "proposedScope" | "proposedKey" | "proposedValue" | "evidenceIds" | "confidence" | "rationale"
+  "proposedScope" | "proposedProjectId" | "proposedKey" | "proposedValue" | "evidenceIds" | "confidence" | "rationale"
 > & {
   policyRule?: string;
 };
 
 export type CandidateReviewAction = "approve" | "reject" | "snooze";
+
+export type PromotionState = "queued" | "active" | "invalidation-pending" | "invalidated";
+export type PromotionOperation = "apply" | "invalidate";
+export type PromotionInvalidationReason =
+  | "evidence-changed"
+  | "evidence-unavailable"
+  | "access-revoked"
+  | "retention-expired";
+
+export type PromotionTask = {
+  taskId: string;
+  promotionId: string;
+  adapterId: string;
+  operation: PromotionOperation;
+  deploymentId: string;
+  principalId: string;
+  scope: string;
+  projectId?: string;
+  key: string;
+  value?: string;
+  reason?: PromotionInvalidationReason;
+  attempts: number;
+};
+
+export type PromotionSummary = {
+  promotionId: string;
+  candidateId: string;
+  adapterId: string;
+  scope: string;
+  projectId?: string;
+  key: string;
+  state: PromotionState;
+  attempts: number;
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
+};
 
 type CandidateRow = {
   candidate_id: string;
@@ -167,16 +206,49 @@ export class FabricLedger implements CursorStore {
         evidence_id TEXT NOT NULL REFERENCES evidence_current(evidence_id),
         PRIMARY KEY (candidate_id, evidence_id)
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS memory_promotions (
+        promotion_id TEXT PRIMARY KEY,
+        candidate_id TEXT NOT NULL UNIQUE,
+        principal_id TEXT NOT NULL,
+        deployment_id TEXT NOT NULL,
+        adapter_id TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        project_id TEXT,
+        key TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('queued', 'active', 'invalidation-pending', 'invalidated')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS promotion_outbox (
+        task_id TEXT PRIMARY KEY,
+        promotion_id TEXT NOT NULL REFERENCES memory_promotions(promotion_id),
+        operation TEXT NOT NULL CHECK (operation IN ('apply', 'invalidate')),
+        value TEXT,
+        reason TEXT,
+        created_at TEXT NOT NULL,
+        completed_at TEXT,
+        UNIQUE (promotion_id, operation)
+      ) STRICT;
       CREATE INDEX IF NOT EXISTS memory_candidates_principal_state
         ON memory_candidates (principal_id, state, created_at);
       CREATE INDEX IF NOT EXISTS candidate_evidence_evidence
         ON candidate_evidence (evidence_id, candidate_id);
+      CREATE INDEX IF NOT EXISTS promotion_outbox_pending
+        ON promotion_outbox (completed_at, created_at, task_id);
     `);
     const healthColumns = this.#database.prepare(
       "SELECT name FROM pragma_table_info('connector_health')",
     ).all() as unknown as Array<{ name: string }>;
     if (!healthColumns.some((column) => column.name === "available_until")) {
       this.#database.exec("ALTER TABLE connector_health ADD COLUMN available_until TEXT");
+    }
+    const promotionColumns = this.#database.prepare(
+      "SELECT name FROM pragma_table_info('memory_promotions')",
+    ).all() as unknown as Array<{ name: string }>;
+    if (!promotionColumns.some((column) => column.name === "project_id")) {
+      this.#database.exec("ALTER TABLE memory_promotions ADD COLUMN project_id TEXT");
     }
   }
 
@@ -231,15 +303,33 @@ export class FabricLedger implements CursorStore {
     const availableUntil = available
       ? new Date(now.getTime() + ttlSeconds * 1000).toISOString()
       : null;
-    this.#database.prepare(`
-      INSERT INTO connector_health (
-        connector_id, available, checked_at, available_until
-      ) VALUES (?, ?, ?, ?)
-      ON CONFLICT(connector_id) DO UPDATE SET
-        available = excluded.available,
-        checked_at = excluded.checked_at,
-        available_until = excluded.available_until
-    `).run(connectorId, available ? 1 : 0, now.toISOString(), availableUntil);
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      this.#database.prepare(`
+        INSERT INTO connector_health (
+          connector_id, available, checked_at, available_until
+        ) VALUES (?, ?, ?, ?)
+        ON CONFLICT(connector_id) DO UPDATE SET
+          available = excluded.available,
+          checked_at = excluded.checked_at,
+          available_until = excluded.available_until
+      `).run(connectorId, available ? 1 : 0, now.toISOString(), availableUntil);
+      if (!available) {
+        const candidates = this.#database.prepare(`
+          SELECT DISTINCT candidate_evidence.candidate_id
+          FROM candidate_evidence
+          JOIN evidence_current USING (evidence_id)
+          WHERE evidence_current.connector = ?
+        `).all(connectorId) as unknown as Array<{ candidate_id: string }>;
+        for (const candidate of candidates) {
+          this.#invalidatePromotion(candidate.candidate_id, "evidence-unavailable", now.toISOString());
+        }
+      }
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   #connectorAvailable(connectorId: string, now: Date): boolean {
@@ -371,6 +461,9 @@ export class FabricLedger implements CursorStore {
     principalId: string,
     now = new Date(),
   ): MemoryCandidate {
+    if (proposal.proposedScope !== "project" && proposal.proposedProjectId !== undefined) {
+      throw new Error("Only project-scoped candidates can select a target project identity.");
+    }
     const ids = [...new Set(proposal.evidenceIds)];
     if (ids.length !== proposal.evidenceIds.length) {
       throw new Error("Candidate evidence ids must be unique.");
@@ -390,11 +483,17 @@ export class FabricLedger implements CursorStore {
     const expiries = evidence
       .flatMap((row) => row.expires_at === null ? [] : [row.expires_at])
       .sort((left, right) => Date.parse(left) - Date.parse(right));
+    const containers = [...new Set(evidence.map((row) => row.container))];
     const candidate = MemoryCandidateSchema.parse({
       schemaVersion: 1,
       candidateId: `candidate-${randomUUID()}`,
       deploymentId: evidence[0]!.deployment_id,
       proposedScope: proposal.proposedScope,
+      ...(proposal.proposedProjectId !== undefined
+        ? { proposedProjectId: proposal.proposedProjectId }
+        : proposal.proposedScope === "project" && containers.length === 1
+          ? { proposedProjectId: containers[0] }
+          : {}),
       proposedKey: proposal.proposedKey,
       proposedValue: proposal.proposedValue,
       evidenceIds: ids,
@@ -431,6 +530,81 @@ export class FabricLedger implements CursorStore {
       throw error;
     }
     return candidate;
+  }
+
+  editCandidate(
+    candidateId: string,
+    patch: CandidatePatch,
+    principalId: string,
+    now = new Date(),
+  ): MemoryCandidate {
+    const validatedPatch = CandidatePatchSchema.parse(patch);
+    this.#refreshCandidateValidity(principalId, now);
+    const row = this.#database.prepare(`
+      SELECT candidate_id, principal_id, state, candidate_json
+      FROM memory_candidates WHERE candidate_id = ? AND principal_id = ?
+    `).get(candidateId, principalId) as CandidateRow | undefined;
+    if (row === undefined) throw new Error(`Unknown candidate: ${candidateId}.`);
+    if (row.state !== "pending" && row.state !== "snoozed") {
+      throw new Error(`Only pending or snoozed candidates can be edited: ${candidateId}.`);
+    }
+    if (!this.#candidateSourcesAvailable(candidateId, now)) {
+      throw new Error(`Candidate source is unavailable: ${candidateId}.`);
+    }
+
+    const current = MemoryCandidateSchema.parse(JSON.parse(row.candidate_json));
+    const proposedScope = validatedPatch.proposedScope ?? current.proposedScope;
+    if (proposedScope !== "project" && validatedPatch.proposedProjectId !== undefined) {
+      throw new Error("Only project-scoped candidates can select a target project identity.");
+    }
+    const evidenceIds = validatedPatch.evidenceIds ?? current.evidenceIds;
+    const ids = [...new Set(evidenceIds)];
+    if (ids.length !== evidenceIds.length) throw new Error("Candidate evidence ids must be unique.");
+    const evidence = ids.map((id) => this.#database.prepare(
+      "SELECT * FROM evidence_current WHERE evidence_id = ?",
+    ).get(id) as CurrentRow | undefined);
+    if (evidence.some((item) => item === undefined)) {
+      throw new Error("Candidate evidence must exist in the current ledger.");
+    }
+    const rows = evidence as CurrentRow[];
+    if (rows.some((item) => !this.#usable(item, principalId, now) || item.payload === null)) {
+      throw new Error("Candidate evidence must be active, unexpired, and accessible, with an available source.");
+    }
+    if (rows.some((item) => item.deployment_id !== current.deploymentId)) {
+      throw new Error("Edited candidate evidence must stay in the original deployment.");
+    }
+    const expiries = rows
+      .flatMap((item) => item.expires_at === null ? [] : [item.expires_at])
+      .sort((left, right) => Date.parse(left) - Date.parse(right));
+    const editedInput: Record<string, unknown> = {
+      ...current,
+      ...validatedPatch,
+      evidenceIds: ids,
+      state: "pending",
+      expiresAt: expiries[0],
+    };
+    if (proposedScope !== "project") delete editedInput.proposedProjectId;
+    const edited = MemoryCandidateSchema.parse(editedInput);
+
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      this.#database.prepare(`
+        UPDATE memory_candidates SET state = ?, candidate_json = ?, updated_at = ?
+        WHERE candidate_id = ?
+      `).run(edited.state, JSON.stringify(edited), now.toISOString(), candidateId);
+      if (validatedPatch.evidenceIds !== undefined) {
+        this.#database.prepare("DELETE FROM candidate_evidence WHERE candidate_id = ?").run(candidateId);
+        const attach = this.#database.prepare(
+          "INSERT INTO candidate_evidence (candidate_id, evidence_id) VALUES (?, ?)",
+        );
+        for (const id of ids) attach.run(candidateId, id);
+      }
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
+    }
+    return edited;
   }
 
   extractionEvidence(
@@ -518,22 +692,216 @@ export class FabricLedger implements CursorStore {
     return this.#setCandidateState(row, state, now.toISOString());
   }
 
+  queuePromotion(
+    candidateId: string,
+    adapterId: string,
+    principalId: string,
+    now = new Date(),
+  ): PromotionSummary {
+    this.#refreshCandidateValidity(principalId, now);
+    const row = this.#database.prepare(`
+      SELECT candidate_id, principal_id, state, candidate_json
+      FROM memory_candidates WHERE candidate_id = ? AND principal_id = ?
+    `).get(candidateId, principalId) as CandidateRow | undefined;
+    if (row === undefined) throw new Error(`Unknown candidate: ${candidateId}.`);
+    if (row.state !== "approved") throw new Error(`Candidate must be approved before promotion: ${candidateId}.`);
+    if (!this.#candidateSourcesAvailable(candidateId, now)) {
+      throw new Error(`Candidate source is unavailable: ${candidateId}.`);
+    }
+    const existing = this.#database.prepare(
+      "SELECT * FROM memory_promotions WHERE candidate_id = ?",
+    ).get(candidateId) as Record<string, unknown> | undefined;
+    if (existing !== undefined) {
+      const summary = this.#promotionSummary(existing);
+      if (summary.adapterId !== adapterId) {
+        throw new Error(`Candidate promotion is already bound to adapter ${summary.adapterId}.`);
+      }
+      return summary;
+    }
+
+    const candidate = MemoryCandidateSchema.parse(JSON.parse(row.candidate_json));
+    if (candidate.proposedScope === "project" && candidate.proposedProjectId === undefined) {
+      throw new Error(`Project-scoped candidate has no target project identity: ${candidateId}.`);
+    }
+    if (candidate.proposedScope !== "project" && candidate.proposedProjectId !== undefined) {
+      throw new Error(`Non-project candidate has a target project identity: ${candidateId}.`);
+    }
+    const timestamp = now.toISOString();
+    const promotionId = candidate.candidateId;
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      this.#database.prepare(`
+        INSERT INTO memory_promotions (
+          promotion_id, candidate_id, principal_id, deployment_id, adapter_id,
+          scope, project_id, key, state, attempts, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?)
+      `).run(
+        promotionId,
+        candidate.candidateId,
+        principalId,
+        candidate.deploymentId,
+        adapterId,
+        candidate.proposedScope,
+        candidate.proposedProjectId ?? null,
+        candidate.proposedKey,
+        timestamp,
+        timestamp,
+      );
+      this.#database.prepare(`
+        INSERT INTO promotion_outbox (
+          task_id, promotion_id, operation, value, created_at
+        ) VALUES (?, ?, 'apply', ?, ?)
+      `).run(`task-${randomUUID()}`, promotionId, candidate.proposedValue, timestamp);
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
+    }
+    return this.listPromotions(principalId).find((item) => item.promotionId === promotionId)!;
+  }
+
+  listPromotions(principalId: string): PromotionSummary[] {
+    const rows = this.#database.prepare(`
+      SELECT * FROM memory_promotions
+      WHERE principal_id = ?
+      ORDER BY created_at DESC, promotion_id ASC
+    `).all(principalId) as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => this.#promotionSummary(row));
+  }
+
+  pendingPromotionTasks(adapterId: string): PromotionTask[] {
+    const rows = this.#database.prepare(`
+      SELECT promotion_outbox.task_id, promotion_outbox.operation,
+        promotion_outbox.value, promotion_outbox.reason,
+        memory_promotions.promotion_id, memory_promotions.adapter_id,
+        memory_promotions.deployment_id, memory_promotions.principal_id,
+        memory_promotions.scope, memory_promotions.key, memory_promotions.attempts
+        , memory_promotions.project_id
+      FROM promotion_outbox
+      JOIN memory_promotions USING (promotion_id)
+      WHERE promotion_outbox.completed_at IS NULL AND memory_promotions.adapter_id = ?
+      ORDER BY promotion_outbox.created_at ASC, promotion_outbox.task_id ASC
+    `).all(adapterId) as unknown as Array<{
+      task_id: string;
+      promotion_id: string;
+      adapter_id: string;
+      operation: PromotionOperation;
+      deployment_id: string;
+      principal_id: string;
+      scope: string;
+      project_id: string | null;
+      key: string;
+      value: string | null;
+      reason: PromotionInvalidationReason | null;
+      attempts: number;
+    }>;
+    return rows.map((row) => ({
+      taskId: row.task_id,
+      promotionId: row.promotion_id,
+      adapterId: row.adapter_id,
+      operation: row.operation,
+      deploymentId: row.deployment_id,
+      principalId: row.principal_id,
+      scope: row.scope,
+      ...(row.project_id === null ? {} : { projectId: row.project_id }),
+      key: row.key,
+      ...(row.value === null ? {} : { value: row.value }),
+      ...(row.reason === null ? {} : { reason: row.reason }),
+      attempts: row.attempts,
+    }));
+  }
+
+  completePromotionTask(taskId: string, now = new Date()): void {
+    const task = this.#database.prepare(`
+      SELECT promotion_outbox.operation, promotion_outbox.promotion_id,
+        promotion_outbox.completed_at, memory_promotions.state
+      FROM promotion_outbox JOIN memory_promotions USING (promotion_id)
+      WHERE task_id = ?
+    `).get(taskId) as {
+      operation: PromotionOperation;
+      promotion_id: string;
+      completed_at: string | null;
+      state: PromotionState;
+    } | undefined;
+    if (task === undefined) throw new Error(`Unknown promotion task: ${taskId}.`);
+    if (task.completed_at !== null && !(task.operation === "apply" && task.state === "invalidated")) return;
+
+    const timestamp = now.toISOString();
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      this.#database.prepare(
+        "UPDATE promotion_outbox SET completed_at = ? WHERE task_id = ?",
+      ).run(timestamp, taskId);
+      if (task.operation === "invalidate") {
+        this.#database.prepare(`
+          UPDATE memory_promotions
+          SET state = 'invalidated', last_error = NULL, updated_at = ?
+          WHERE promotion_id = ?
+        `).run(timestamp, task.promotion_id);
+      } else if (task.state === "invalidated") {
+        this.#database.prepare(`
+          UPDATE memory_promotions
+          SET state = 'invalidation-pending', last_error = NULL, updated_at = ?
+          WHERE promotion_id = ?
+        `).run(timestamp, task.promotion_id);
+        this.#insertInvalidationTask(task.promotion_id, "evidence-unavailable", timestamp);
+      } else {
+        this.#database.prepare(`
+          UPDATE memory_promotions
+          SET state = 'active', last_error = NULL, updated_at = ?
+          WHERE promotion_id = ?
+        `).run(timestamp, task.promotion_id);
+      }
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  failPromotionTask(taskId: string, error: unknown, now = new Date()): void {
+    void error;
+    const sanitized = "Promotion adapter failed; inspect deployment-local diagnostics.";
+    const result = this.#database.prepare(`
+      UPDATE memory_promotions
+      SET attempts = attempts + 1, last_error = ?, updated_at = ?
+      WHERE promotion_id = (
+        SELECT promotion_id FROM promotion_outbox WHERE task_id = ? AND completed_at IS NULL
+      )
+    `).run(sanitized, now.toISOString(), taskId);
+    if (result.changes === 0) throw new Error(`Unknown or completed promotion task: ${taskId}.`);
+  }
+
   #refreshCandidateValidity(principalId: string, now: Date): void {
     const rows = this.#database.prepare(`
       SELECT DISTINCT candidate_id
       FROM memory_candidates
       WHERE principal_id = ?
     `).all(principalId) as unknown as Array<{ candidate_id: string }>;
-    for (const { candidate_id: candidateId } of rows) {
-      const evidence = this.#database.prepare(`
-        SELECT evidence_current.*
-        FROM candidate_evidence
-        JOIN evidence_current USING (evidence_id)
-        WHERE candidate_id = ?
-      `).all(candidateId) as unknown as CurrentRow[];
-      if (evidence.length === 0 || evidence.some((row) => !authorized(row, principalId, now))) {
-        this.#deleteCandidate(candidateId);
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      for (const { candidate_id: candidateId } of rows) {
+        const evidence = this.#database.prepare(`
+          SELECT evidence_current.*
+          FROM candidate_evidence
+          JOIN evidence_current USING (evidence_id)
+          WHERE candidate_id = ?
+        `).all(candidateId) as unknown as CurrentRow[];
+        if (evidence.length === 0 || evidence.some((row) => !authorized(row, principalId, now))) {
+          const reason = evidence.some((row) =>
+            row.state === "expired"
+            || (row.expires_at !== null && Date.parse(row.expires_at) <= now.getTime())
+          ) ? "retention-expired" : "access-revoked";
+          this.#invalidatePromotion(candidateId, reason, now.toISOString());
+          this.#deleteCandidate(candidateId);
+        } else if (!this.#candidateSourcesAvailable(candidateId, now)) {
+          this.#invalidatePromotion(candidateId, "evidence-unavailable", now.toISOString());
+        }
       }
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
     }
   }
 
@@ -568,6 +936,13 @@ export class FabricLedger implements CursorStore {
     `).all(id) as unknown as CandidateRow[];
     for (const row of rows) {
       if (evidence === undefined || !authorized(evidence, row.principal_id, now)) {
+        const reason = evidence?.state === "expired"
+          || (evidence?.expires_at !== null
+            && evidence?.expires_at !== undefined
+            && Date.parse(evidence.expires_at) <= now.getTime())
+          ? "retention-expired"
+          : "access-revoked";
+        this.#invalidatePromotion(row.candidate_id, reason, now.toISOString());
         this.#deleteCandidate(row.candidate_id);
       } else if (["pending", "snoozed", "approved"].includes(row.state)) {
         this.#invalidateCandidate(row.candidate_id, now.toISOString());
@@ -581,7 +956,69 @@ export class FabricLedger implements CursorStore {
       FROM memory_candidates WHERE candidate_id = ?
     `).get(candidateId) as CandidateRow | undefined;
     if (row === undefined || row.state === "invalid" || row.state === "rejected") return;
+    this.#invalidatePromotion(candidateId, "evidence-changed", updatedAt);
     this.#setCandidateState(row, "invalid", updatedAt);
+  }
+
+  #invalidatePromotion(
+    candidateId: string,
+    reason: PromotionInvalidationReason,
+    updatedAt: string,
+  ): void {
+    const promotion = this.#database.prepare(`
+      SELECT promotion_id, state FROM memory_promotions WHERE candidate_id = ?
+    `).get(candidateId) as { promotion_id: string; state: PromotionState } | undefined;
+    if (promotion === undefined || promotion.state === "invalidated" || promotion.state === "invalidation-pending") {
+      return;
+    }
+    if (promotion.state === "queued") {
+      this.#database.prepare(`
+        UPDATE promotion_outbox SET completed_at = ?, value = NULL
+        WHERE promotion_id = ? AND operation = 'apply' AND completed_at IS NULL
+      `).run(updatedAt, promotion.promotion_id);
+      this.#database.prepare(`
+        UPDATE memory_promotions
+        SET state = 'invalidation-pending', last_error = NULL, updated_at = ?
+        WHERE promotion_id = ?
+      `).run(updatedAt, promotion.promotion_id);
+      this.#insertInvalidationTask(promotion.promotion_id, reason, updatedAt);
+      return;
+    }
+    this.#database.prepare(`
+      UPDATE memory_promotions
+      SET state = 'invalidation-pending', last_error = NULL, updated_at = ?
+      WHERE promotion_id = ?
+    `).run(updatedAt, promotion.promotion_id);
+    this.#insertInvalidationTask(promotion.promotion_id, reason, updatedAt);
+  }
+
+  #insertInvalidationTask(
+    promotionId: string,
+    reason: PromotionInvalidationReason,
+    createdAt: string,
+  ): void {
+    this.#database.prepare(`
+      INSERT INTO promotion_outbox (
+        task_id, promotion_id, operation, reason, created_at
+      ) VALUES (?, ?, 'invalidate', ?, ?)
+      ON CONFLICT (promotion_id, operation) DO NOTHING
+    `).run(`task-${randomUUID()}`, promotionId, reason, createdAt);
+  }
+
+  #promotionSummary(row: Record<string, unknown>): PromotionSummary {
+    return {
+      promotionId: String(row.promotion_id),
+      candidateId: String(row.candidate_id),
+      adapterId: String(row.adapter_id),
+      scope: String(row.scope),
+      ...(row.project_id === null || row.project_id === undefined ? {} : { projectId: String(row.project_id) }),
+      key: String(row.key),
+      state: row.state as PromotionState,
+      attempts: Number(row.attempts),
+      ...(row.last_error === null || row.last_error === undefined ? {} : { lastError: String(row.last_error) }),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
   }
 
   #setCandidateState(row: CandidateRow, state: CandidateState, updatedAt: string): MemoryCandidate {

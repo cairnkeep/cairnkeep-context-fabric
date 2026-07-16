@@ -5,10 +5,13 @@ import {
   CandidateExtractionRequestSchema,
   CandidateExtractionResultSchema,
   ContextRequestSchema,
+  type CandidatePatch,
   type CandidateState,
   type ContextPacket,
   type ContextRequest,
   type MemoryCandidate,
+  type MemoryInvalidationRequest,
+  type MemoryPromotionRequest,
 } from "@cairnkeep/context-contracts";
 import {
   pullConnectorBatch,
@@ -26,7 +29,10 @@ import {
   type CandidateProposal,
   type CandidateReviewAction,
   type EvidenceSummary,
+  type PromotionSummary,
+  type PromotionTask,
 } from "./ledger.js";
+import { validateMemoryPromotionAdapter, type MemoryPromotionAdapter } from "./promotion.js";
 import { SyntheticConnector } from "./synthetic-connector.js";
 
 type SourceRuntime = {
@@ -84,11 +90,13 @@ export class FabricRuntime {
   readonly #ledger: FabricLedger;
   readonly #sources: Map<string, SourceRuntime>;
   readonly #extractor: CandidateExtractor | undefined;
+  readonly #promotionAdapter: MemoryPromotionAdapter | undefined;
 
   constructor(
     config: FabricConfig,
     registrations: readonly ConnectorRegistration[] = [],
     extractor?: CandidateExtractor,
+    promotionAdapter?: MemoryPromotionAdapter,
   ) {
     this.#config = config;
     const registered = new Map<string, ConnectorRegistration>();
@@ -117,6 +125,9 @@ export class FabricRuntime {
     this.#ledger = new FabricLedger(join(config.dataDir, "fabric.sqlite"));
     this.#sources = sources;
     this.#extractor = extractor === undefined ? undefined : validateCandidateExtractor(extractor);
+    this.#promotionAdapter = promotionAdapter === undefined
+      ? undefined
+      : validateMemoryPromotionAdapter(promotionAdapter);
     for (const source of sources.values()) {
       if (!source.config.enabled) this.#ledger.setConnectorAvailability(source.config.id, false);
     }
@@ -292,6 +303,81 @@ export class FabricRuntime {
     principalId = this.#config.principalId,
   ): MemoryCandidate {
     return this.#ledger.reviewCandidate(candidateId, action, principalId);
+  }
+
+  editCandidate(
+    candidateId: string,
+    patch: CandidatePatch,
+    principalId = this.#config.principalId,
+  ): MemoryCandidate {
+    return this.#ledger.editCandidate(candidateId, patch, principalId);
+  }
+
+  promotions(principalId = this.#config.principalId): PromotionSummary[] {
+    return this.#ledger.listPromotions(principalId);
+  }
+
+  async promoteCandidate(
+    candidateId: string,
+    principalId = this.#config.principalId,
+  ): Promise<PromotionSummary> {
+    const adapter = this.#requirePromotionAdapter();
+    this.#ledger.queuePromotion(candidateId, adapter.id, principalId);
+    await this.reconcilePromotions(principalId);
+    const promotion = this.promotions(principalId).find((item) => item.candidateId === candidateId);
+    if (promotion === undefined) throw new Error(`Promotion disappeared for candidate: ${candidateId}.`);
+    if (promotion.state !== "active") {
+      throw new Error(promotion.lastError ?? `Promotion did not complete: ${candidateId}.`);
+    }
+    return promotion;
+  }
+
+  async reconcilePromotions(principalId = this.#config.principalId): Promise<{
+    processed: number;
+    failed: number;
+    promotions: PromotionSummary[];
+  }> {
+    const adapter = this.#requirePromotionAdapter();
+    this.#ledger.listCandidates(principalId);
+    let processed = 0;
+    let failed = 0;
+    for (const task of this.#ledger.pendingPromotionTasks(adapter.id)) {
+      try {
+        await this.#runPromotionTask(adapter, task);
+        this.#ledger.completePromotionTask(task.taskId);
+        processed += 1;
+      } catch (error) {
+        this.#ledger.failPromotionTask(task.taskId, error);
+        failed += 1;
+      }
+    }
+    return { processed, failed, promotions: this.promotions(principalId) };
+  }
+
+  #requirePromotionAdapter(): MemoryPromotionAdapter {
+    if (this.#promotionAdapter === undefined) {
+      throw new Error("Memory promotion is disabled: no promotion adapter is configured.");
+    }
+    return this.#promotionAdapter;
+  }
+
+  async #runPromotionTask(adapter: MemoryPromotionAdapter, task: PromotionTask): Promise<void> {
+    const common = {
+      schemaVersion: 1 as const,
+      promotionId: task.promotionId,
+      deploymentId: task.deploymentId,
+      principalId: task.principalId,
+      scope: task.scope,
+      ...(task.projectId === undefined ? {} : { projectId: task.projectId }),
+      key: task.key,
+    };
+    if (task.operation === "apply") {
+      if (task.value === undefined) throw new Error(`Promotion task ${task.taskId} has no value.`);
+      await adapter.apply({ ...common, value: task.value } satisfies MemoryPromotionRequest);
+      return;
+    }
+    if (task.reason === undefined) throw new Error(`Invalidation task ${task.taskId} has no reason.`);
+    await adapter.invalidate({ ...common, reason: task.reason } satisfies MemoryInvalidationRequest);
   }
 
   #source(id: string): SourceRuntime {
