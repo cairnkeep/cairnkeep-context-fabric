@@ -14,6 +14,9 @@ vertical slice.
 - Candidates are visible and reviewable only by the principal that proposed
   them.
 - Review transitions are `approve`, `reject`, and `snooze`.
+- Pending and snoozed candidates can be edited by their owner. Editing
+  revalidates every cited evidence record and returns the candidate to
+  `pending`; approved, rejected, and invalid candidates are immutable.
 - Approved and rejected states are final review decisions.
 - A source update invalidates pending, snoozed, and approved candidates.
 - An access change invalidates a candidate only while its owner remains
@@ -52,13 +55,51 @@ adapters are responsible for structured-output prompting, endpoint allowlists,
 credential isolation, timeouts, response-size limits, and audit logging that
 does not include evidence content.
 
+## Editing
+
+```bash
+cairn-fabric candidates edit \
+  --id candidate-ID \
+  --value "Corrected durable fact" \
+  --rationale "The selected evidence states the corrected fact." \
+  --config /path/to/private-fabric.json
+```
+
+Scope, target project identity, key, value, evidence IDs, confidence, and
+rationale are editable. The candidate ID, deployment, policy rule, and creation
+time are immutable. When all cited evidence uses one container, the ledger
+derives that container as the initial project identity; the reviewer must verify
+or correct it before promotion.
+
 ## Promotion boundary
 
-Approval does not call Cairnkeep and does not create durable memory. A future
-promotion adapter must revalidate evidence and policy at the time of promotion,
-write through a versioned Cairnkeep contract, persist the resulting mapping, and
-support invalidation or supersession. Until that boundary exists and is tested,
-reviewed candidates remain in this queue.
+Approval does not call Cairnkeep and does not create durable memory. Promotion
+is a separate explicit action and is disabled unless the deployment executable
+registers a provider-neutral `MemoryPromotionAdapter`:
 
-Scheduled extraction, candidate editing, and a web review interface remain
-future work. Extraction is manual and does not alter the promotion boundary.
+```bash
+cairn-fabric candidates promote --id candidate-ID --config /path/to/private-fabric.json
+cairn-fabric promotions list --config /path/to/private-fabric.json
+cairn-fabric promotions reconcile --config /path/to/private-fabric.json
+```
+
+At promotion time the ledger revalidates ownership, approval, evidence access,
+retention, and source availability. It then commits a minimal promotion mapping
+and an apply task to the SQLite outbox before calling the adapter. Failed calls
+remain retryable; adapter operations must be idempotent by promotion ID. The
+ledger stores only a fixed failure diagnostic, never arbitrary adapter exception
+text that could contain deployment details.
+
+Source updates, source outages, access revocation, deletion, and retention
+expiry atomically enqueue invalidation before candidate content can be purged.
+The mapping retains only deployment/principal/project routing, adapter ID,
+scope, key, state, and timestamps. Proposed values are removed from the outbox
+when an unapplied candidate becomes invalid.
+
+The deployment adapter must use a durable memory contract that supports both
+idempotent apply and tombstoned invalidation. Invalidation of an unseen ID must
+prevent a delayed apply from resurrecting stale memory. The public repository
+does not bundle an endpoint, credentials, or a deployment adapter.
+
+Scheduled extraction and a web review interface remain future work. Extraction,
+review, editing, and promotion are operator actions.
