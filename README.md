@@ -12,11 +12,12 @@ Pre-alpha synthetic vertical slice. The repository defines protocol contracts,
 an authenticated client, a connector SDK, a mode-0600 deployment configuration,
 a durable SQLite evidence ledger, incremental synthetic ingestion, lifecycle-
 aware authorization, cited context retrieval, a durable human-review candidate
-queue, an explicitly registered connector plug-in boundary, non-admitting source
-preview, and a loopback-first service.
+queue, an explicitly registered connector plug-in boundary, a provider-neutral
+candidate extractor boundary, non-admitting source preview, and a loopback-first
+service.
 
-It does not include live connectors, schedulers, model calls, compiled knowledge,
-automatic candidate extraction, candidate editing, memory promotion, or
+It does not include bundled live connectors, schedulers, model clients, compiled
+knowledge, scheduled candidate extraction, candidate editing, memory promotion, or
 deployment credentials. Synthetic fixtures are still the only accepted source
 type.
 
@@ -41,6 +42,8 @@ Raw evidence never writes directly to durable memory.
 - Context requests contain work metadata, not automatically captured prompts.
 - Source deletion, expiry, and access revocation fail closed.
 - Synthetic fixtures are the only accepted data during the initial spike.
+- Extractors are deployment-owned, explicit, and unable to approve or promote
+  their output.
 
 ## Repository structure
 

@@ -47,7 +47,40 @@ export const MemoryCandidateSchema = z.object({
   expiresAt: z.iso.datetime({ offset: true }).optional(),
 }).strict();
 
+export const CandidateDraftSchema = MemoryCandidateSchema.pick({
+  proposedScope: true,
+  proposedKey: true,
+  proposedValue: true,
+  evidenceIds: true,
+  confidence: true,
+  rationale: true,
+}).strict();
+
+export const CandidateExtractionEvidenceSchema = z.object({
+  evidenceId: IdentifierSchema,
+  content: z.string().min(1).max(262_144),
+  mimeType: z.string().min(1).max(256).optional(),
+  occurredAt: z.iso.datetime({ offset: true }),
+}).strict();
+
+export const CandidateExtractionRequestSchema = z.object({
+  schemaVersion: z.literal(1),
+  deploymentId: IdentifierSchema,
+  principalId: IdentifierSchema,
+  extractorId: IdentifierSchema,
+  evidence: z.array(CandidateExtractionEvidenceSchema).min(1).max(32),
+}).strict();
+
+export const CandidateExtractionResultSchema = z.object({
+  schemaVersion: z.literal(1),
+  candidates: z.array(CandidateDraftSchema).max(32),
+}).strict();
+
 export type ClaimStatus = z.infer<typeof ClaimStatusSchema>;
 export type Claim = z.infer<typeof ClaimSchema>;
 export type CandidateState = z.infer<typeof CandidateStateSchema>;
 export type MemoryCandidate = z.infer<typeof MemoryCandidateSchema>;
+export type CandidateDraft = z.infer<typeof CandidateDraftSchema>;
+export type CandidateExtractionEvidence = z.infer<typeof CandidateExtractionEvidenceSchema>;
+export type CandidateExtractionRequest = z.infer<typeof CandidateExtractionRequestSchema>;
+export type CandidateExtractionResult = z.infer<typeof CandidateExtractionResultSchema>;

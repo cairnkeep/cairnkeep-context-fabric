@@ -4,6 +4,7 @@ import { CandidateStateSchema } from "@cairnkeep/context-contracts";
 import type { ConnectorRegistration } from "@cairnkeep/connector-sdk";
 
 import { loadFabricConfig } from "./config.js";
+import type { CandidateExtractor } from "./extractor.js";
 import type { CandidateReviewAction } from "./ledger.js";
 import { FabricRuntime } from "./runtime.js";
 
@@ -23,13 +24,14 @@ function required(value: string | undefined, name: string): string {
 export async function runFabricOperator(
   args: readonly string[],
   registrations: readonly ConnectorRegistration[] = [],
+  extractor?: CandidateExtractor,
 ): Promise<unknown> {
   const configPath = resolve(required(
     option(args, "--config", process.env.CAIRN_FABRIC_CONFIG),
     "--config or CAIRN_FABRIC_CONFIG",
   ));
   const config = loadFabricConfig(configPath, registrations);
-  const runtime = new FabricRuntime(config, registrations);
+  const runtime = new FabricRuntime(config, registrations, extractor);
   try {
     const [group, action] = args;
     if (group === "sources" && action === "list") return await runtime.sources();
@@ -68,6 +70,13 @@ export async function runFabricOperator(
         rationale: required(option(args, "--rationale"), "--rationale"),
       });
     }
+    if (group === "candidates" && action === "extract") {
+      const evidenceIds = required(option(args, "--evidence"), "--evidence")
+        .split(",")
+        .map((value) => value.trim())
+        .filter((value) => value.length > 0);
+      return await runtime.extractCandidates(evidenceIds);
+    }
     if (group === "candidates" && action === "list") {
       const rawStates = option(args, "--state");
       const states = rawStates === undefined
@@ -86,7 +95,7 @@ export async function runFabricOperator(
       );
     }
     throw new Error(
-      "Usage: cairn-fabric sources list|sources preview|ingest --once|evidence list|context get|candidates propose|candidates list|candidates review --config FILE [options]",
+      "Usage: cairn-fabric sources list|sources preview|ingest --once|evidence list|context get|candidates propose|candidates extract|candidates list|candidates review --config FILE [options]",
     );
   } finally {
     runtime.close();

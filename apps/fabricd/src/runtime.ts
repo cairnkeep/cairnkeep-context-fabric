@@ -2,6 +2,8 @@ import { chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import {
+  CandidateExtractionRequestSchema,
+  CandidateExtractionResultSchema,
   ContextRequestSchema,
   type CandidateState,
   type ContextPacket,
@@ -18,6 +20,7 @@ import {
 } from "@cairnkeep/connector-sdk";
 
 import type { FabricConfig, FabricSourceConfig, SyntheticSourceConfig } from "./config.js";
+import { validateCandidateExtractor, type CandidateExtractor } from "./extractor.js";
 import {
   FabricLedger,
   type CandidateProposal,
@@ -66,6 +69,12 @@ export type SourceIngestResult = {
   cursorAdvanced: boolean;
 };
 
+export type CandidateExtractionSummary = {
+  extractorId: string;
+  candidateCount: number;
+  candidateIds: string[];
+};
+
 function syntheticSource(source: FabricSourceConfig): source is SyntheticSourceConfig {
   return source.type === "synthetic" && "fixturePath" in source;
 }
@@ -74,8 +83,13 @@ export class FabricRuntime {
   readonly #config: FabricConfig;
   readonly #ledger: FabricLedger;
   readonly #sources: Map<string, SourceRuntime>;
+  readonly #extractor: CandidateExtractor | undefined;
 
-  constructor(config: FabricConfig, registrations: readonly ConnectorRegistration[] = []) {
+  constructor(
+    config: FabricConfig,
+    registrations: readonly ConnectorRegistration[] = [],
+    extractor?: CandidateExtractor,
+  ) {
     this.#config = config;
     const registered = new Map<string, ConnectorRegistration>();
     for (const registration of registrations) {
@@ -102,6 +116,7 @@ export class FabricRuntime {
     chmodSync(config.dataDir, 0o700);
     this.#ledger = new FabricLedger(join(config.dataDir, "fabric.sqlite"));
     this.#sources = sources;
+    this.#extractor = extractor === undefined ? undefined : validateCandidateExtractor(extractor);
     for (const source of sources.values()) {
       if (!source.config.enabled) this.#ledger.setConnectorAvailability(source.config.id, false);
     }
@@ -217,6 +232,51 @@ export class FabricRuntime {
     principalId = this.#config.principalId,
   ): MemoryCandidate {
     return this.#ledger.proposeCandidate(proposal, principalId);
+  }
+
+  async extractCandidates(
+    evidenceIds: readonly string[],
+    principalId = this.#config.principalId,
+  ): Promise<CandidateExtractionSummary> {
+    if (this.#extractor === undefined) {
+      throw new Error("No candidate extractor is registered for this deployment.");
+    }
+    const evidence = this.#ledger.extractionEvidence(evidenceIds, principalId);
+    if (evidence.some((item) => item.deploymentId !== this.#config.deploymentId)) {
+      throw new Error("Candidate extraction evidence belongs to a different deployment.");
+    }
+    const request = CandidateExtractionRequestSchema.parse({
+      schemaVersion: 1,
+      deploymentId: this.#config.deploymentId,
+      principalId,
+      extractorId: this.#extractor.id,
+      evidence: evidence.map(({ deploymentId: _deploymentId, ...item }) => item),
+    });
+    const result = CandidateExtractionResultSchema.parse(await this.#extractor.extract(request));
+    const allowedEvidence = new Set(evidenceIds);
+    const signatures = new Set<string>();
+    for (const draft of result.candidates) {
+      if (draft.evidenceIds.some((id) => !allowedEvidence.has(id))) {
+        throw new Error("Candidate extractor cited evidence outside the selected set.");
+      }
+      if (new Set(draft.evidenceIds).size !== draft.evidenceIds.length) {
+        throw new Error("Candidate extractor returned duplicate evidence citations.");
+      }
+      const signature = JSON.stringify(draft);
+      if (signatures.has(signature)) {
+        throw new Error("Candidate extractor returned duplicate proposals.");
+      }
+      signatures.add(signature);
+    }
+    const candidates = result.candidates.map((draft) => this.#ledger.proposeCandidate({
+      ...draft,
+      policyRule: this.#extractor!.policyRule,
+    }, principalId));
+    return {
+      extractorId: this.#extractor.id,
+      candidateCount: candidates.length,
+      candidateIds: candidates.map((candidate) => candidate.candidateId),
+    };
   }
 
   candidates(
