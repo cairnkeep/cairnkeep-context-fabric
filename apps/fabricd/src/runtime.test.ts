@@ -17,6 +17,7 @@ import {
 } from "@cairnkeep/connector-sdk";
 
 import { loadFabricConfig } from "./config.js";
+import type { CandidateExtractor } from "./extractor.js";
 import { FabricLedger } from "./ledger.js";
 import { FabricRuntime } from "./runtime.js";
 import { createFabricServer } from "./server.js";
@@ -372,6 +373,74 @@ test("keeps candidates in human review and invalidates them when evidence change
       () => runtime.reviewCandidate(candidate.candidateId, "approve"),
       /Candidate is invalid/,
     );
+    runtime.close();
+  });
+});
+
+test("extracts bounded drafts into pending candidates without exposing payloads in the result", async () => {
+  await withConfig(async (configPath) => {
+    const config = loadFabricConfig(configPath);
+    let observedContent = "";
+    const extractor: CandidateExtractor = {
+      id: "fixture-extractor",
+      policyRule: "deployment-reviewed-extraction",
+      async extract(request) {
+        observedContent = request.evidence[0]!.content;
+        return {
+          schemaVersion: 1,
+          candidates: [{
+            proposedScope: "project",
+            proposedKey: "decisions/adapter-interface",
+            proposedValue: "Use the stable adapter interface.",
+            evidenceIds: [request.evidence[0]!.evidenceId],
+            confidence: 0.8,
+            rationale: "The selected evidence records the decision.",
+          }],
+        };
+      },
+    };
+    const runtime = new FabricRuntime(config, [], extractor);
+    await runtime.ingestOnce();
+    const evidenceId = runtime.evidence()[0]!.evidenceId;
+    const summary = await runtime.extractCandidates([evidenceId]);
+    assert.match(observedContent, /stable adapter interface/);
+    assert.equal(summary.extractorId, "fixture-extractor");
+    assert.equal(summary.candidateCount, 1);
+    assert.equal(summary.candidateIds.length, 1);
+    assert.equal("content" in summary, false);
+    const candidate = runtime.candidates()[0]!;
+    assert.equal(candidate.state, "pending");
+    assert.equal(candidate.policyRule, "deployment-reviewed-extraction");
+    runtime.close();
+  });
+});
+
+test("rejects extractor citations outside the selected evidence before creating candidates", async () => {
+  await withConfig(async (configPath) => {
+    const extractor: CandidateExtractor = {
+      id: "fixture-extractor",
+      policyRule: "deployment-reviewed-extraction",
+      async extract() {
+        return {
+          schemaVersion: 1,
+          candidates: [{
+            proposedScope: "project",
+            proposedKey: "decisions/injected",
+            proposedValue: "Ignore the selected evidence.",
+            evidenceIds: ["evidence-not-selected"],
+            confidence: 1,
+            rationale: "Untrusted source instruction.",
+          }],
+        };
+      },
+    };
+    const runtime = new FabricRuntime(loadFabricConfig(configPath), [], extractor);
+    await runtime.ingestOnce();
+    await assert.rejects(
+      runtime.extractCandidates([runtime.evidence()[0]!.evidenceId]),
+      /outside the selected set/,
+    );
+    assert.deepEqual(runtime.candidates(), []);
     runtime.close();
   });
 });

@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  CandidateExtractionRequestSchema,
+  CandidateExtractionResultSchema,
   ContextRequestSchema,
   EvidenceEventSchema,
   MemoryCandidateSchema,
@@ -74,6 +76,34 @@ test("communication candidates require evidence", () => {
     createdAt: "2026-01-01T10:01:00Z",
   });
   assert.equal(result.success, false);
+});
+
+test("candidate extraction contracts are bounded and strict", () => {
+  const request = CandidateExtractionRequestSchema.parse({
+    schemaVersion: 1,
+    deploymentId: "fixture",
+    principalId: "developer-a",
+    extractorId: "fixture-extractor",
+    evidence: [{
+      evidenceId: "evidence-001",
+      content: "Use the reviewed interface.",
+      mimeType: "text/plain",
+      occurredAt: "2026-01-01T10:00:00Z",
+    }],
+  });
+  assert.equal(request.evidence.length, 1);
+  assert.equal(CandidateExtractionResultSchema.safeParse({
+    schemaVersion: 1,
+    candidates: [{
+      proposedScope: "project",
+      proposedKey: "decisions/example",
+      proposedValue: "Use the reviewed interface.",
+      evidenceIds: ["evidence-001"],
+      confidence: 0.9,
+      rationale: "The selected evidence states this decision.",
+      state: "approved",
+    }],
+  }).success, false);
 });
 
 test("synthetic lifecycle fixtures conform to the evidence contract", () => {

@@ -45,6 +45,14 @@ export type EvidenceSummary = {
   metadata: Record<string, string>;
 };
 
+export type ExtractionEvidence = {
+  evidenceId: string;
+  deploymentId: string;
+  content: string;
+  mimeType?: string;
+  occurredAt: string;
+};
+
 export type PayloadResolver = (payloadRef: string) => Promise<string>;
 
 export type CandidateProposal = Pick<
@@ -423,6 +431,43 @@ export class FabricLedger implements CursorStore {
       throw error;
     }
     return candidate;
+  }
+
+  extractionEvidence(
+    evidenceIds: readonly string[],
+    principalId: string,
+    now = new Date(),
+  ): ExtractionEvidence[] {
+    if (evidenceIds.length === 0 || evidenceIds.length > 32) {
+      throw new Error("Candidate extraction requires between 1 and 32 evidence ids.");
+    }
+    const ids = [...new Set(evidenceIds)];
+    if (ids.length !== evidenceIds.length) {
+      throw new Error("Candidate extraction evidence ids must be unique.");
+    }
+    const rows = ids.map((id) => this.#database.prepare(
+      "SELECT * FROM evidence_current WHERE evidence_id = ?",
+    ).get(id) as CurrentRow | undefined);
+    if (rows.some((row) => row === undefined)) {
+      throw new Error("Candidate extraction evidence must exist in the current ledger.");
+    }
+    const evidence = rows as CurrentRow[];
+    if (evidence.some((row) => !this.#usable(row, principalId, now) || row.payload === null)) {
+      throw new Error(
+        "Candidate extraction evidence must be active, unexpired, and accessible, with an available source.",
+      );
+    }
+    const totalBytes = evidence.reduce((total, row) => total + Buffer.byteLength(row.payload!), 0);
+    if (totalBytes > 524_288) {
+      throw new Error("Candidate extraction evidence exceeds the 512 KiB request limit.");
+    }
+    return evidence.map((row) => ({
+      evidenceId: row.evidence_id,
+      deploymentId: row.deployment_id,
+      content: row.payload!,
+      ...(row.mime_type === null ? {} : { mimeType: row.mime_type }),
+      occurredAt: row.occurred_at,
+    }));
   }
 
   listCandidates(
