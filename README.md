@@ -14,7 +14,7 @@ a durable SQLite evidence ledger, incremental synthetic ingestion, lifecycle-
 aware authorization, cited context retrieval, an editable durable human-review
 candidate queue, explicitly registered connector/extractor/promotion boundaries,
 a replay-safe promotion outbox with lifecycle invalidation, non-admitting source
-preview, and a loopback-first service.
+preview, authorized exact-evidence inspection, and a loopback-first service.
 
 It does not include bundled live connectors, schedulers, model clients, compiled
 knowledge, scheduled candidate extraction, a web review interface, a memory

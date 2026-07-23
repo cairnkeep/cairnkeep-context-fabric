@@ -28,6 +28,7 @@ import {
   FabricLedger,
   type CandidateProposal,
   type CandidateReviewAction,
+  type EvidenceDetail,
   type EvidenceSummary,
   type PromotionSummary,
   type PromotionTask,
@@ -236,6 +237,10 @@ export class FabricRuntime {
 
   evidence(includeInactive = false, principalId = this.#config.principalId): EvidenceSummary[] {
     return this.#ledger.listEvidence(principalId, includeInactive);
+  }
+
+  evidenceDetail(evidenceId: string, principalId = this.#config.principalId): EvidenceDetail {
+    return this.#ledger.evidence(evidenceId, principalId);
   }
 
   proposeCandidate(
