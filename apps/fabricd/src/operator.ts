@@ -46,6 +46,9 @@ export async function runFabricOperator(
     if (group === "evidence" && action === "list") {
       return runtime.evidence(args.includes("--include-inactive"));
     }
+    if (group === "evidence" && action === "show") {
+      return runtime.evidenceDetail(required(option(args, "--id"), "--id"));
+    }
     if (group === "context" && action === "get") {
       return runtime.context({
         schemaVersion: 1,
@@ -123,7 +126,7 @@ export async function runFabricOperator(
     if (group === "promotions" && action === "list") return runtime.promotions();
     if (group === "promotions" && action === "reconcile") return await runtime.reconcilePromotions();
     throw new Error(
-      "Usage: cairn-fabric sources list|sources preview|ingest --once|evidence list|context get|candidates propose|candidates extract|candidates list|candidates edit|candidates review|candidates promote|promotions list|promotions reconcile --config FILE [options]",
+      "Usage: cairn-fabric sources list|sources preview|ingest --once|evidence list|evidence show --id ID|context get|candidates propose|candidates extract|candidates list|candidates edit|candidates review|candidates promote|promotions list|promotions reconcile --config FILE [options]",
     );
   } finally {
     runtime.close();

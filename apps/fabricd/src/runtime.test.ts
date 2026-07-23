@@ -343,6 +343,13 @@ test("expires source health leases without destroying reviewed candidates", asyn
     ledger.setConnectorAvailability("mock", true, checkedAt, 60);
     const beforeExpiry = new Date("2026-01-02T00:00:59Z");
     const evidenceId = ledger.listEvidence("developer-a", false, beforeExpiry)[0]!.evidenceId;
+    const detail = ledger.evidence(evidenceId, "developer-a", beforeExpiry);
+    assert.equal(detail.content, fixture.payloads[event.content!.payloadRef]);
+    assert.equal(detail.accessible, true);
+    assert.throws(
+      () => ledger.evidence(evidenceId, "unlisted-developer", beforeExpiry),
+      /Evidence is unavailable/,
+    );
     const candidate = ledger.proposeCandidate({
       proposedScope: "project",
       proposedKey: "decisions/adapter-interface",
@@ -356,10 +363,15 @@ test("expires source health leases without destroying reviewed candidates", asyn
     const afterExpiry = new Date("2026-01-02T00:01:01Z");
     assert.deepEqual(ledger.listEvidence("developer-a", false, afterExpiry), []);
     assert.equal(ledger.listEvidence("developer-a", true, afterExpiry)[0]?.accessible, false);
+    assert.throws(
+      () => ledger.evidence(evidenceId, "developer-a", afterExpiry),
+      /Evidence is unavailable/,
+    );
     assert.deepEqual(ledger.listCandidates("developer-a", undefined, afterExpiry), []);
 
     ledger.setConnectorAvailability("mock", true, afterExpiry, 60);
     assert.equal(ledger.listEvidence("developer-a", false, afterExpiry).length, 1);
+    assert.equal(ledger.evidence(evidenceId, "developer-a", afterExpiry).evidenceId, evidenceId);
     assert.equal(ledger.listCandidates("developer-a", undefined, afterExpiry)[0]?.state, "approved");
     ledger.close();
   });
@@ -834,6 +846,16 @@ test("exposes the synthetic operator workflow through the CLI", async () => {
     assert.equal(packet.sections.length, 1);
     assert.equal(packet.citations.length, 1);
     const evidence = run("evidence", "list") as Array<{ evidenceId: string }>;
+    const shown = run("evidence", "show", "--id", evidence[0]!.evidenceId) as {
+      evidenceId: string;
+      content: string;
+      accessible: boolean;
+      sha256?: string;
+    };
+    assert.equal(shown.evidenceId, evidence[0]!.evidenceId);
+    assert.equal(shown.accessible, true);
+    assert.match(shown.content, /stable adapter interface/i);
+    assert.match(shown.sha256 ?? "", /^[a-f0-9]{64}$/);
     const candidate = run(
       "candidates",
       "propose",

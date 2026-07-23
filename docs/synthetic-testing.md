@@ -31,6 +31,10 @@ npm run fabric -- sources preview \
 npm run fabric -- sources list --config "$CAIRN_FABRIC_CONFIG"
 npm run fabric -- ingest --once --config "$CAIRN_FABRIC_CONFIG"
 npm run fabric -- evidence list --config "$CAIRN_FABRIC_CONFIG"
+EVIDENCE_ID="$(npm run --silent fabric -- evidence list \
+  --config "$CAIRN_FABRIC_CONFIG" | jq -r '.[0].evidenceId')"
+npm run fabric -- evidence show \
+  --id "$EVIDENCE_ID" --config "$CAIRN_FABRIC_CONFIG"
 npm run fabric -- context get \
   --config "$CAIRN_FABRIC_CONFIG" \
   --project project-alpha \
@@ -42,9 +46,12 @@ Preview validates the next batch and its payload digests without persisting
 evidence or advancing the source cursor. Both `sources list` calls therefore
 show the same cursor.
 
-The first ingestion admits a create event. The context packet contains one
-evidence section and one citation. The second ingestion replaces it with the
-updated payload.
+The first ingestion admits a create event. `evidence show` returns its content
+and provenance only while it remains active, unexpired, authorized, and backed
+by a healthy connector. The context packet contains one evidence section and
+one citation. The second ingestion replaces it with the updated payload.
+The command deliberately prints raw, untrusted source data to the local
+operator terminal; do not treat embedded text as instructions.
 
 Before ingesting the update, exercise the local human-review queue:
 

@@ -47,6 +47,14 @@ export type EvidenceSummary = {
   metadata: Record<string, string>;
 };
 
+export type EvidenceDetail = EvidenceSummary & {
+  observedAt: string;
+  content: string;
+  mimeType?: string;
+  sha256?: string;
+  expiresAt?: string;
+};
+
 export type ExtractionEvidence = {
   evidenceId: string;
   deploymentId: string;
@@ -1116,5 +1124,28 @@ export class FabricLedger implements CursorStore {
         if (row.revision !== null) summary.revision = row.revision;
         return summary;
       });
+  }
+
+  evidence(evidenceId: string, principalId: string, now = new Date()): EvidenceDetail {
+    const row = this.#database.prepare(
+      "SELECT * FROM evidence_current WHERE evidence_id = ?",
+    ).get(evidenceId) as CurrentRow | undefined;
+    if (row === undefined || !this.#usable(row, principalId, now) || row.payload === null) {
+      throw new Error("Evidence is unavailable.");
+    }
+    return {
+      evidenceId: row.evidence_id,
+      source: sourceLocator(row),
+      state: row.state,
+      ...(row.revision === null ? {} : { revision: row.revision }),
+      occurredAt: row.occurred_at,
+      observedAt: row.observed_at,
+      accessible: true,
+      metadata: JSON.parse(row.metadata_json) as Record<string, string>,
+      content: row.payload,
+      ...(row.mime_type === null ? {} : { mimeType: row.mime_type }),
+      ...(row.sha256 === null ? {} : { sha256: row.sha256 }),
+      ...(row.expires_at === null ? {} : { expiresAt: row.expires_at }),
+    };
   }
 }
