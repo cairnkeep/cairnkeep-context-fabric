@@ -26,6 +26,6 @@
     "@cairnkeep/context-client": "0.1.0",
     "@cairnkeep/context-contracts": "0.1.0",
     "@cairnkeep/connector-sdk": "0.3.0",
-    "zod": "4.4.3"
+    "zod": "4.6.5"
   }
 }
